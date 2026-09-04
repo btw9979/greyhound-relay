@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import {
   applyRunOrPassResult,
@@ -107,6 +108,7 @@ const RESULT_LABELS: Record<ResultType, string> = {
 };
 
 export default function BoothPage() {
+  const router = useRouter();
   const [supabase] = useState(() => createClient());
   const [game, setGame] = useState<Game | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
@@ -296,6 +298,11 @@ export default function BoothPage() {
     } catch {
       setInitError("Couldn't end the game. Check connection and try again.");
     }
+  }
+
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    router.push("/login");
   }
 
   // The mode the about-to-start drive will use: a pending switch if one is
@@ -564,6 +571,7 @@ export default function BoothPage() {
             onClose={() => setSheet(null)}
             onNewGame={openGameSetup}
             onEndGame={() => setSheet("endGameConfirm")}
+            onLogout={handleLogout}
           />
         )}
 
@@ -752,6 +760,7 @@ export default function BoothPage() {
           onClose={() => setSheet(null)}
           onNewGame={openGameSetup}
           onEndGame={() => setSheet("endGameConfirm")}
+          onLogout={handleLogout}
         />
       )}
 
@@ -900,11 +909,13 @@ function ManageGameSheet({
   onClose,
   onNewGame,
   onEndGame,
+  onLogout,
 }: {
   inProgress: boolean;
   onClose: () => void;
   onNewGame: () => void;
   onEndGame: () => void;
+  onLogout: () => void;
 }) {
   return (
     <Sheet title="Manage Game" onClose={onClose}>
@@ -924,6 +935,13 @@ function ManageGameSheet({
           className="rounded-xl bg-red-600 px-4 py-4 text-lg font-bold text-white active:bg-red-700 disabled:opacity-40"
         >
           End Game
+        </button>
+        <button
+          type="button"
+          onClick={onLogout}
+          className="mt-2 rounded-xl border border-slate-700 px-4 py-3 text-sm font-semibold text-slate-400 active:bg-slate-800"
+        >
+          Logout
         </button>
       </div>
     </Sheet>

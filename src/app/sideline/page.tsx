@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { getCurrentGame, formatDownDistance, formatFieldPosition } from "@/lib/plays";
 import type { Game, Play } from "@/lib/plays";
@@ -72,6 +73,7 @@ export default function SidelinePage() {
   useWakeLock();
   useOrientationLock();
 
+  const router = useRouter();
   const [supabase] = useState(() => createClient());
   const [game, setGame] = useState<Game | null>(null);
   const [play, setPlay] = useState<Play | null>(null);
@@ -220,6 +222,11 @@ export default function SidelinePage() {
 
   const freshness = freshnessFor(elapsed);
 
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    router.push("/login");
+  }
+
   return (
     <main className="flex flex-1 flex-col gap-3 p-4">
       <header className="flex items-center justify-between">
@@ -241,6 +248,7 @@ export default function SidelinePage() {
         <GameSummary
           offenseYards={currentSummary?.offenseYards ?? null}
           defenseYards={currentSummary?.defenseYards ?? null}
+          onLogout={handleLogout}
         />
       )}
 
@@ -339,9 +347,11 @@ export default function SidelinePage() {
 function GameSummary({
   offenseYards,
   defenseYards,
+  onLogout,
 }: {
   offenseYards: number | null;
   defenseYards: number | null;
+  onLogout: () => void;
 }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
@@ -363,6 +373,14 @@ function GameSummary({
           <span className="text-4xl font-black">{defenseYards ?? "—"}</span>
         </div>
       </div>
+
+      <button
+        type="button"
+        onClick={onLogout}
+        className="mt-6 rounded-xl border border-slate-600 px-6 py-3 text-sm font-semibold uppercase tracking-wide text-slate-300 active:bg-slate-800"
+      >
+        Log Out
+      </button>
     </div>
   );
 }
