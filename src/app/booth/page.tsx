@@ -512,6 +512,16 @@ export default function BoothPage() {
     });
   }
 
+  function submitScore() {
+    if (!state) return;
+    // A score is a real scrimmage play covering a real distance — from the
+    // current spot to the goal line — not just a drive-ending event with
+    // no yardage, unlike Turnover/Penalty. Computed the same way P & Goal
+    // is: the current offense's attacking-frame distance to the goal.
+    const yards = attackingFieldPosition(state.mode, state.fieldPosition);
+    submitResult("SCORE", yards);
+  }
+
   function submitPenalty() {
     const down = Number(penaltyDown);
     const distance = Number(penaltyDistance);
@@ -819,7 +829,7 @@ export default function BoothPage() {
             </button>
             <button
               type="button"
-              onClick={() => submitResult("SCORE", null)}
+              onClick={submitScore}
               className="rounded-xl bg-emerald-600 px-4 py-4 text-base font-semibold text-white active:bg-emerald-700"
             >
               {RESULT_LABELS.SCORE}
