@@ -104,7 +104,7 @@ const RESULT_LABELS: Record<ResultType, string> = {
   PASS_INCOMPLETE: "Pass Incomplete",
   PENALTY: "Penalty",
   TURNOVER: "Turnover",
-  SCORE: "Score",
+  SCORE: "TD",
 };
 
 export default function BoothPage() {
@@ -663,7 +663,7 @@ export default function BoothPage() {
             disabled={disabled}
             onSelect={(v) => updateAndSend({ flat: v })}
             options={[
-              { value: "SET", text: "SET", clean: true },
+              { value: "SET", text: "CLEAR", clean: true },
               { value: "DEFENDER", text: "DEFENDER", clean: false },
             ]}
           />

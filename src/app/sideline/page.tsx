@@ -9,7 +9,7 @@ import { SwitchRole } from "@/components/SwitchRole";
 import { useWakeLock } from "@/lib/useWakeLock";
 import { useOrientationLock } from "@/lib/useOrientationLock";
 
-const FLAT_LABELS = { SET: "SET", DEFENDER: "DEFENDER" } as const;
+const FLAT_LABELS = { SET: "CLEAR", DEFENDER: "DEFENDER" } as const;
 const FORMATION_LABELS = { OPEN: "OPEN", CLOSED: "CLOSED" } as const;
 const SPLITS_LABELS = {
   NONE: "Correct",
