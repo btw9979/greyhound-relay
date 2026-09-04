@@ -1,0 +1,7 @@
+-- Bulk-delete all practice/training games and their plays. Run manually in
+-- the Supabase SQL editor when you want to clear test/practice data —
+-- plays cascade-delete automatically via games.id -> plays.game_id.
+--
+-- Not wired into any UI on purpose (POC stage) — copy/paste and run by hand.
+
+delete from public.games where game_type = 'practice';

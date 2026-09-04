@@ -1,0 +1,7 @@
+-- Copy to seed.sql (gitignored) or run manually in the Supabase SQL editor.
+-- Add every staff email allowed to sign in and write reads.
+
+insert into public.staff_allowlist (email) values
+  ('coach1@example.com'),
+  ('coach2@example.com')
+on conflict (email) do nothing;

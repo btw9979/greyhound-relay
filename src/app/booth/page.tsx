@@ -1,0 +1,963 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { createClient } from "@/lib/supabase/client";
+import {
+  applyRunOrPassResult,
+  attackingFieldPosition,
+  formatDownDistance,
+  formatFieldPosition,
+  getCurrentGame,
+  startNewGame,
+  DEFAULT_DISTANCE,
+  DEFAULT_DOWN,
+  DEFAULT_FLAT,
+  DEFAULT_FORMATION,
+  DEFAULT_PERSONNEL,
+  DEFAULT_SPLITS,
+} from "@/lib/plays";
+import type {
+  Down,
+  Flat,
+  Formation,
+  Game,
+  GameType,
+  Mode,
+  Personnel,
+  Play,
+  ResultType,
+  Splits,
+} from "@/lib/plays";
+import { SwitchRole } from "@/components/SwitchRole";
+import { Sheet } from "@/components/Sheet";
+import { ExceptionToggle } from "@/components/ExceptionToggle";
+
+type TapStatus = "idle" | "sending" | "sent" | "error";
+
+interface GameState {
+  driveNumber: number;
+  mode: Mode;
+  down: Down;
+  distance: number;
+  fieldPosition: number;
+  personnel: Personnel;
+  flat: Flat;
+  splits: Splits;
+  formation: Formation;
+}
+
+function ToggleRow<T extends string>({
+  label,
+  value,
+  options,
+  onSelect,
+  disabled,
+}: {
+  label: string;
+  value: T;
+  options: { value: T; text: string; clean: boolean }[];
+  onSelect: (v: T) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div>
+      <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-slate-400">
+        {label}
+      </p>
+      <div className="grid grid-cols-2 gap-3">
+        {options.map((opt) => {
+          const active = opt.value === value;
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              disabled={disabled}
+              onClick={() => onSelect(opt.value)}
+              className={[
+                "rounded-2xl px-4 py-6 text-xl font-bold transition-colors disabled:opacity-50",
+                active
+                  ? opt.clean
+                    ? "bg-emerald-500 text-emerald-950 ring-4 ring-emerald-300"
+                    : "bg-red-500 text-red-950 ring-4 ring-red-300"
+                  : "bg-slate-800 text-slate-300 active:bg-slate-700",
+              ].join(" ")}
+            >
+              {opt.text}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Standard touchback yard line — the receiving team's own 25, per NFHS/NCAA
+// convention. Which fp value that maps to depends on which team receives;
+// see triggerAutoNewDrive.
+const TOUCHBACK_YARD_LINE = 25;
+
+const RESULT_LABELS: Record<ResultType, string> = {
+  RUN: "Run",
+  PASS_COMPLETE: "Pass Complete",
+  PASS_INCOMPLETE: "Pass Incomplete",
+  PENALTY: "Penalty",
+  TURNOVER: "Turnover",
+  SCORE: "Score",
+};
+
+export default function BoothPage() {
+  const [supabase] = useState(() => createClient());
+  const [game, setGame] = useState<Game | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [ready, setReady] = useState(false);
+  const [initError, setInitError] = useState<string | null>(null);
+  const [status, setStatus] = useState<TapStatus>("idle");
+
+  const [state, setState] = useState<GameState | null>(null);
+  const [pendingMode, setPendingMode] = useState<Mode>("OFFENSE");
+  // The mode a new drive should switch to when triggered via the
+  // OFFENSE/DEFENSE toggle, a Turnover/Score result, or turnover on downs;
+  // null for a manually-selected P (new drive, mode unchanged).
+  const [pendingDriveMode, setPendingDriveMode] = useState<Mode | null>(null);
+  // Set only for the automatic Turnover/Score triggers, which compute their
+  // own default (flip the turnover spot, or a touchback for a score)
+  // instead of the generic "reuse current field position" default.
+  const [pendingFieldPositionOverride, setPendingFieldPositionOverride] = useState<number | null>(
+    null,
+  );
+
+  const [sheet, setSheet] = useState<
+    "newDrive" | "result" | "newGame" | "confirmModeSwitch" | "confirmFieldPosition" | null
+  >(null);
+  const [newDriveField, setNewDriveField] = useState("");
+
+  const [pendingResult, setPendingResult] = useState<ResultType | null>(null);
+  const [yardageSign, setYardageSign] = useState<1 | -1>(1);
+  const [yardageMagnitude, setYardageMagnitude] = useState("0");
+  const [penaltyDown, setPenaltyDown] = useState(String(DEFAULT_DOWN));
+  const [penaltyDistance, setPenaltyDistance] = useState("10");
+  const [penaltyFieldPosition, setPenaltyFieldPosition] = useState("50");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+
+      try {
+        const currentGame = await getCurrentGame(supabase);
+        if (cancelled) return;
+        setUserId(user.id);
+
+        if (!currentGame) return;
+        setGame(currentGame);
+
+        const { data: latest } = await supabase
+          .from("plays")
+          .select("*")
+          .eq("game_id", currentGame.id)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!cancelled && latest) {
+          const p = latest as Play;
+          setPendingMode(p.mode);
+          setState({
+            driveNumber: p.drive_number,
+            mode: p.mode,
+            down: p.down,
+            distance: p.distance,
+            fieldPosition: p.field_position,
+            personnel: p.personnel,
+            flat: p.flat ?? DEFAULT_FLAT,
+            splits: p.splits ?? DEFAULT_SPLITS,
+            formation: p.formation ?? DEFAULT_FORMATION,
+          });
+        }
+      } catch {
+        if (!cancelled) {
+          setInitError("Couldn't reach the server. Check connection and reload.");
+        }
+      } finally {
+        if (!cancelled) setReady(true);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [supabase]);
+
+  const insert = useCallback(
+    async (
+      next: GameState,
+      result: { type: ResultType; yards: number | null } | null,
+    ) => {
+      if (!game || !userId) return false;
+      setStatus("sending");
+      const { error } = await supabase.from("plays").insert({
+        game_id: game.id,
+        created_by: userId,
+        drive_number: next.driveNumber,
+        mode: next.mode,
+        down: next.down,
+        distance: next.distance,
+        field_position: next.fieldPosition,
+        personnel: next.personnel,
+        flat: next.mode === "OFFENSE" ? next.flat : null,
+        splits: next.mode === "OFFENSE" ? next.splits : null,
+        formation: next.mode === "DEFENSE" ? next.formation : null,
+        result_type: result?.type ?? null,
+        result_yards: result?.yards ?? null,
+      });
+      setStatus(error ? "error" : "sent");
+      if (!error) {
+        setTimeout(() => setStatus((s) => (s === "sent" ? "idle" : s)), 1500);
+      }
+      return !error;
+    },
+    [game, userId, supabase],
+  );
+
+  const disabled = !ready || !game || status === "sending";
+
+  function updateAndSend(patch: Partial<GameState>) {
+    if (!state) return;
+    const next = { ...state, ...patch };
+    setState(next);
+    insert(next, null);
+  }
+
+  async function beginNewGame(gameType: GameType) {
+    try {
+      const newGame = await startNewGame(supabase, gameType);
+      setGame(newGame);
+      setState(null);
+      setPendingMode("OFFENSE");
+      resetDriveFlow();
+      setSheet(null);
+      setInitError(null);
+    } catch {
+      setInitError("Couldn't start the game. Check connection and try again.");
+    }
+  }
+
+  // The mode the about-to-start drive will use: a pending switch if one is
+  // underway (toggle, Turnover/Score, or turnover on downs), otherwise the
+  // current state's mode — or, before any drive has ever started,
+  // whatever's selected on the bootstrap screen's mode toggle.
+  const effectiveMode = state ? pendingDriveMode ?? state.mode : pendingMode;
+
+  // field_position is a fixed physical coordinate — yards from the actual
+  // opponent's goal line — independent of which team currently has the
+  // ball (formatFieldPosition takes no mode/team argument, which is the
+  // tell). A mode switch or turnover doesn't move the ball, so it never
+  // transforms this number; only Score does, via its own explicit
+  // touchback override below (see triggerAutoNewDrive), since a score's
+  // kickoff genuinely does relocate the ball.
+  const defaultFieldPosition =
+    pendingFieldPositionOverride !== null
+      ? pendingFieldPositionOverride
+      : state
+        ? state.fieldPosition
+        : null;
+
+  function resetDriveFlow() {
+    setPendingDriveMode(null);
+    setPendingFieldPositionOverride(null);
+  }
+
+  function openManualFieldPosition(prefill: number | null) {
+    setNewDriveField(prefill === null ? "" : String(prefill));
+    setSheet("newDrive");
+  }
+
+  // Manual P selection: available at all times (first drive of the game,
+  // first drive of the second half, or correcting a missed auto-trigger).
+  // Unlike the toggle/Turnover/Score paths, this never changes mode on its
+  // own — the mode is assumed to already be correct.
+  function selectManualP() {
+    resetDriveFlow();
+    // No previous play to default from yet (very first drive of the game)
+    // — go straight to manual entry.
+    if (!state) {
+      openManualFieldPosition(null);
+      return;
+    }
+    setSheet("confirmFieldPosition");
+  }
+
+  function requestModeSwitch(mode: Mode) {
+    if (!state || mode === state.mode) return;
+    resetDriveFlow();
+    setPendingDriveMode(mode);
+    setSheet("confirmModeSwitch");
+  }
+
+  function cancelDriveFlow() {
+    resetDriveFlow();
+    setSheet(null);
+  }
+
+  function confirmModeSwitch() {
+    setSheet("confirmFieldPosition");
+  }
+
+  // Turnover/Score always mean both a mode switch and a new drive — no
+  // "continue?" prompt, straight to the field-position default/override
+  // step. Also used for turnover on downs, which is the same event (loss
+  // of possession) even though it isn't the "Turnover" result button.
+  function triggerAutoNewDrive(fromMode: Mode, fromFieldPosition: number, kind: "TURNOVER" | "SCORE") {
+    const newMode: Mode = fromMode === "OFFENSE" ? "DEFENSE" : "OFFENSE";
+    setPendingDriveMode(newMode);
+    setPendingFieldPositionOverride(
+      kind === "SCORE"
+        ? // Touchback = the receiving team's own 25. Which team that is
+          // depends on the new mode: OFFENSE means Lisbon receives (Own
+          // 25 = fp 75); DEFENSE means the opponent receives (Opp 25 =
+          // fp 25) — this isn't the same fp regardless of direction.
+          newMode === "OFFENSE"
+          ? 100 - TOUCHBACK_YARD_LINE
+          : TOUCHBACK_YARD_LINE
+        : // A turnover doesn't move the ball — same fixed spot, unchanged.
+          fromFieldPosition,
+    );
+    setSheet("confirmFieldPosition");
+  }
+
+  async function commitNewDrive(fieldPosition: number) {
+    const next: GameState = {
+      driveNumber: (state?.driveNumber ?? 0) + 1,
+      mode: effectiveMode,
+      down: "P",
+      // Goal-to-go suggestion needs the new offense's attacking distance,
+      // not the raw fixed coordinate — those only match when mode is
+      // OFFENSE.
+      distance: Math.min(DEFAULT_DISTANCE, attackingFieldPosition(effectiveMode, fieldPosition)),
+      fieldPosition,
+      personnel: DEFAULT_PERSONNEL,
+      flat: DEFAULT_FLAT,
+      splits: DEFAULT_SPLITS,
+      formation: DEFAULT_FORMATION,
+    };
+    const ok = await insert(next, null);
+    if (ok) {
+      setState(next);
+      setSheet(null);
+      resetDriveFlow();
+    }
+    return ok;
+  }
+
+  function acceptDefaultFieldPosition() {
+    if (defaultFieldPosition === null) return;
+    commitNewDrive(defaultFieldPosition);
+  }
+
+  async function submitNewDrive() {
+    const fp = Number(newDriveField);
+    if (!Number.isInteger(fp) || fp < 1 || fp > 99) return;
+    await commitNewDrive(fp);
+  }
+
+  function openResult() {
+    setPendingResult(null);
+    setYardageSign(1);
+    setYardageMagnitude("0");
+    if (state) {
+      // A penalty can happen on the P & 10 play itself — fall back to a
+      // real number rather than prefilling the literal "P".
+      setPenaltyDown(state.down === "P" ? String(DEFAULT_DOWN) : String(state.down));
+      setPenaltyDistance(String(state.distance));
+      setPenaltyFieldPosition(String(state.fieldPosition));
+    }
+    setSheet("result");
+  }
+
+  async function submitResult(
+    type: ResultType,
+    yards: number | null,
+    overrides?: Partial<GameState>,
+  ): Promise<boolean> {
+    if (!state) return false;
+    const next: GameState = {
+      ...state,
+      ...overrides,
+      personnel: DEFAULT_PERSONNEL,
+      flat: DEFAULT_FLAT,
+      splits: DEFAULT_SPLITS,
+      formation: DEFAULT_FORMATION,
+    };
+    const ok = await insert(next, { type, yards });
+    if (!ok) return false;
+    setState(next);
+    setSheet(null);
+    setPendingResult(null);
+
+    // Unlike the manual toggle, Turnover/Score unambiguously mean a mode
+    // switch and a new drive — no confirmation prompt, straight to the
+    // field-position step.
+    if (type === "TURNOVER" || type === "SCORE") {
+      triggerAutoNewDrive(next.mode, next.fieldPosition, type);
+    }
+    return true;
+  }
+
+  function submitRunOrPass(type: "RUN" | "PASS_COMPLETE") {
+    if (!state) return;
+    const fromMode = state.mode;
+    const gain = Number(yardageMagnitude) * yardageSign;
+    if (!Number.isFinite(gain)) return;
+    const calc = applyRunOrPassResult({
+      mode: state.mode,
+      down: state.down,
+      distance: state.distance,
+      fieldPosition: state.fieldPosition,
+      gainYards: gain,
+    });
+    submitResult(type, gain, {
+      down: calc.down as 1 | 2 | 3 | 4,
+      distance: calc.distance,
+      fieldPosition: calc.fieldPosition,
+    }).then((ok) => {
+      // Turnover on downs is the same loss-of-possession event as the
+      // Turnover result button, just reached via a failed 4th-down play.
+      if (ok && calc.turnoverOnDowns) {
+        triggerAutoNewDrive(fromMode, calc.fieldPosition, "TURNOVER");
+      }
+    });
+  }
+
+  function submitPassIncomplete() {
+    if (!state) return;
+    const fromMode = state.mode;
+    const calc = applyRunOrPassResult({
+      mode: state.mode,
+      down: state.down,
+      distance: state.distance,
+      fieldPosition: state.fieldPosition,
+      gainYards: 0,
+    });
+    submitResult("PASS_INCOMPLETE", 0, {
+      down: calc.down as 1 | 2 | 3 | 4,
+      distance: calc.distance,
+      fieldPosition: calc.fieldPosition,
+    }).then((ok) => {
+      if (ok && calc.turnoverOnDowns) {
+        triggerAutoNewDrive(fromMode, calc.fieldPosition, "TURNOVER");
+      }
+    });
+  }
+
+  function submitPenalty() {
+    const down = Number(penaltyDown);
+    const distance = Number(penaltyDistance);
+    const fp = Number(penaltyFieldPosition);
+    if (!Number.isInteger(down) || down < 1 || down > 4) return;
+    if (!Number.isInteger(distance) || distance < 0) return;
+    if (!Number.isInteger(fp) || fp < 1 || fp > 99) return;
+    submitResult("PENALTY", null, { down: down as 1 | 2 | 3 | 4, distance, fieldPosition: fp });
+  }
+
+  if (!game) {
+    return (
+      <main className="flex flex-1 flex-col gap-8 p-5">
+        <header className="flex items-center justify-between">
+          <h1 className="text-lg font-bold text-slate-50">Booth</h1>
+          <SwitchRole current="booth" />
+        </header>
+
+        {initError && (
+          <p className="rounded-xl bg-red-950 px-4 py-3 text-sm text-red-300">{initError}</p>
+        )}
+
+        <div className="flex flex-1 flex-col items-center justify-center gap-6">
+          <p className="text-sm font-semibold uppercase tracking-widest text-slate-400">
+            Start a game to begin
+          </p>
+          <GameTypeButtons disabled={!ready} onSelect={beginNewGame} />
+        </div>
+      </main>
+    );
+  }
+
+  if (!state) {
+    return (
+      <main className="flex flex-1 flex-col gap-8 p-5">
+        <header className="flex items-center justify-between">
+          <h1 className="text-lg font-bold text-slate-50">Booth</h1>
+          <div className="flex items-center gap-3">
+            <NewGameButton onClick={() => setSheet("newGame")} />
+            <SwitchRole current="booth" />
+          </div>
+        </header>
+
+        {game.game_type === "practice" && <PracticeBanner />}
+
+        {initError && (
+          <p className="rounded-xl bg-red-950 px-4 py-3 text-sm text-red-300">{initError}</p>
+        )}
+
+        <div className="flex flex-1 flex-col items-center justify-center gap-6">
+          <ModeToggle mode={pendingMode} onChange={setPendingMode} disabled={!ready} />
+          <button
+            type="button"
+            disabled={!ready}
+            onClick={selectManualP}
+            className="rounded-2xl bg-sky-600 px-8 py-6 text-2xl font-bold text-white active:bg-sky-700 disabled:opacity-50"
+          >
+            START DRIVE (P &amp; 10)
+          </button>
+        </div>
+
+        {sheet === "newDrive" && (
+          <NewDriveSheet
+            fieldPosition={newDriveField}
+            setFieldPosition={setNewDriveField}
+            onClose={() => setSheet(null)}
+            onSubmit={submitNewDrive}
+          />
+        )}
+
+        {sheet === "newGame" && (
+          <Sheet title="Start New Game" onClose={() => setSheet(null)}>
+            <div className="flex flex-col gap-4">
+              <p className="text-sm text-slate-400">
+                The current game&apos;s data is kept — this just starts a new one and makes it active.
+              </p>
+              <GameTypeButtons disabled={false} onSelect={beginNewGame} />
+            </div>
+          </Sheet>
+        )}
+      </main>
+    );
+  }
+
+  return (
+    <main className="flex flex-1 flex-col gap-6 p-5">
+      <header className="flex items-center justify-between">
+        <h1 className="text-lg font-bold text-slate-50">Booth</h1>
+        <div className="flex items-center gap-3">
+          <StatusPill status={status} />
+          <NewGameButton onClick={() => setSheet("newGame")} />
+          <SwitchRole current="booth" />
+        </div>
+      </header>
+
+      {game.game_type === "practice" && <PracticeBanner />}
+
+      {initError && (
+        <p className="rounded-xl bg-red-950 px-4 py-3 text-sm text-red-300">{initError}</p>
+      )}
+
+      <div className="flex items-center justify-between rounded-xl bg-slate-900 px-4 py-3 text-sm text-slate-300">
+        <span>Drive {state.driveNumber}</span>
+        <span>{formatDownDistance(state.mode, state.down, state.distance, state.fieldPosition)}</span>
+        <span>{formatFieldPosition(state.fieldPosition)}</span>
+      </div>
+
+      <ModeToggle mode={state.mode} disabled={disabled} onChange={requestModeSwitch} />
+
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={selectManualP}
+        className="rounded-xl bg-slate-800 px-4 py-3 text-sm font-semibold text-slate-300 active:bg-slate-700 disabled:opacity-50"
+      >
+        NEW DRIVE (P &amp; 10)
+      </button>
+
+      <ExceptionToggle
+        label="Personnel"
+        value={state.personnel}
+        defaultValue={DEFAULT_PERSONNEL}
+        defaultText="11 on field"
+        flagText="⚠ COUNT ISSUE"
+        disabled={disabled}
+        onSelect={(v) => updateAndSend({ personnel: v })}
+        options={[
+          { value: "SHORT", text: "SHORT (≤10)", severity: "alert" },
+          { value: "OVER", text: "OVER (12+)", severity: "urgent" },
+        ]}
+      />
+
+      {state.mode === "OFFENSE" ? (
+        <>
+          <ToggleRow
+            label="Flat"
+            value={state.flat}
+            disabled={disabled}
+            onSelect={(v) => updateAndSend({ flat: v })}
+            options={[
+              { value: "SET", text: "SET", clean: true },
+              { value: "DEFENDER", text: "DEFENDER", clean: false },
+            ]}
+          />
+          <ExceptionToggle
+            label="Splits"
+            value={state.splits}
+            defaultValue={DEFAULT_SPLITS}
+            defaultText="Correct"
+            flagText="⚠ SPLITS ISSUE"
+            disabled={disabled}
+            onSelect={(v) => updateAndSend({ splits: v })}
+            options={[
+              { value: "FLANKER_TIGHT", text: "FLANKER TIGHT", severity: "alert" },
+              { value: "SLOT_TIGHT", text: "SLOT TIGHT", severity: "alert" },
+              { value: "BOTH_TIGHT", text: "BOTH TIGHT", severity: "alert" },
+            ]}
+          />
+        </>
+      ) : (
+        <ToggleRow
+          label="Formation"
+          value={state.formation}
+          disabled={disabled}
+          onSelect={(v) => updateAndSend({ formation: v })}
+          options={[
+            { value: "OPEN", text: "OPEN", clean: true },
+            { value: "CLOSED", text: "CLOSED", clean: false },
+          ]}
+        />
+      )}
+
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={openResult}
+        className="mt-auto rounded-2xl bg-indigo-600 px-4 py-6 text-2xl font-bold text-white active:bg-indigo-700 disabled:opacity-50"
+      >
+        RESULT
+      </button>
+
+      {sheet === "newDrive" && (
+        <NewDriveSheet
+          fieldPosition={newDriveField}
+          setFieldPosition={setNewDriveField}
+          onClose={cancelDriveFlow}
+          onSubmit={submitNewDrive}
+        />
+      )}
+
+      {sheet === "confirmModeSwitch" && pendingDriveMode && (
+        <Sheet title="Switch Mode" onClose={cancelDriveFlow}>
+          <div className="flex flex-col gap-4">
+            <p className="text-lg text-slate-200">
+              Switching to <span className="font-bold">{pendingDriveMode}</span> will start Drive{" "}
+              <span className="font-bold">{state.driveNumber + 1}</span> at{" "}
+              <span className="font-bold">P &amp; 10</span>. Continue?
+            </p>
+            <button
+              type="button"
+              onClick={confirmModeSwitch}
+              className="rounded-xl bg-indigo-600 px-4 py-4 text-lg font-bold text-white active:bg-indigo-700"
+            >
+              Continue
+            </button>
+            <button
+              type="button"
+              onClick={cancelDriveFlow}
+              className="rounded-xl bg-slate-800 px-4 py-4 text-lg font-semibold text-slate-300 active:bg-slate-700"
+            >
+              Cancel
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "confirmFieldPosition" && defaultFieldPosition !== null && (
+        <Sheet title="New Drive" onClose={cancelDriveFlow}>
+          <div className="flex flex-col gap-4">
+            <p className="text-lg text-slate-200">
+              Start new drive at{" "}
+              <span className="font-bold">{formatFieldPosition(defaultFieldPosition)}</span>?
+            </p>
+            <button
+              type="button"
+              onClick={acceptDefaultFieldPosition}
+              className="rounded-xl bg-sky-600 px-4 py-4 text-lg font-bold text-white active:bg-sky-700"
+            >
+              Yes, use this
+            </button>
+            <button
+              type="button"
+              onClick={() => openManualFieldPosition(defaultFieldPosition)}
+              className="rounded-xl bg-slate-800 px-4 py-4 text-lg font-semibold text-slate-300 active:bg-slate-700"
+            >
+              No, set manually
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "newGame" && (
+        <Sheet title="Start New Game" onClose={() => setSheet(null)}>
+          <div className="flex flex-col gap-4">
+            <p className="text-sm text-slate-400">
+              The current game&apos;s data is kept — this just starts a new one and makes it active.
+            </p>
+            <GameTypeButtons disabled={false} onSelect={beginNewGame} />
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "result" && pendingResult === null && (
+        <Sheet title="Result" onClose={() => setSheet(null)}>
+          <div className="grid grid-cols-2 gap-3">
+            {(["RUN", "PASS_COMPLETE"] as const).map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setPendingResult(t)}
+                className="rounded-xl bg-slate-800 px-4 py-4 text-base font-semibold text-slate-100 active:bg-slate-700"
+              >
+                {RESULT_LABELS[t]}
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={submitPassIncomplete}
+              className="rounded-xl bg-slate-800 px-4 py-4 text-base font-semibold text-slate-100 active:bg-slate-700"
+            >
+              {RESULT_LABELS.PASS_INCOMPLETE}
+            </button>
+            <button
+              type="button"
+              onClick={() => setPendingResult("PENALTY")}
+              className="rounded-xl bg-slate-800 px-4 py-4 text-base font-semibold text-slate-100 active:bg-slate-700"
+            >
+              {RESULT_LABELS.PENALTY}
+            </button>
+            <button
+              type="button"
+              onClick={() => submitResult("TURNOVER", null)}
+              className="rounded-xl bg-red-600 px-4 py-4 text-base font-semibold text-white active:bg-red-700"
+            >
+              {RESULT_LABELS.TURNOVER}
+            </button>
+            <button
+              type="button"
+              onClick={() => submitResult("SCORE", null)}
+              className="rounded-xl bg-emerald-600 px-4 py-4 text-base font-semibold text-white active:bg-emerald-700"
+            >
+              {RESULT_LABELS.SCORE}
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "result" && (pendingResult === "RUN" || pendingResult === "PASS_COMPLETE") && (
+        <Sheet title={`${RESULT_LABELS[pendingResult]} — Yardage`} onClose={() => setPendingResult(null)}>
+          <div className="flex flex-col gap-4">
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setYardageSign(1)}
+                className={[
+                  "rounded-xl px-4 py-4 text-lg font-bold",
+                  yardageSign === 1 ? "bg-emerald-500 text-emerald-950" : "bg-slate-800 text-slate-300",
+                ].join(" ")}
+              >
+                GAIN
+              </button>
+              <button
+                type="button"
+                onClick={() => setYardageSign(-1)}
+                className={[
+                  "rounded-xl px-4 py-4 text-lg font-bold",
+                  yardageSign === -1 ? "bg-red-500 text-red-950" : "bg-slate-800 text-slate-300",
+                ].join(" ")}
+              >
+                LOSS
+              </button>
+            </div>
+            <input
+              type="number"
+              inputMode="numeric"
+              min={0}
+              value={yardageMagnitude}
+              onChange={(e) => setYardageMagnitude(e.target.value)}
+              className="rounded-xl bg-slate-800 px-4 py-4 text-center text-2xl font-bold text-slate-50"
+            />
+            <button
+              type="button"
+              onClick={() => submitRunOrPass(pendingResult)}
+              className="rounded-xl bg-indigo-600 px-4 py-4 text-lg font-bold text-white active:bg-indigo-700"
+            >
+              Log Play
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "result" && pendingResult === "PENALTY" && (
+        <Sheet title="Penalty — Resulting State" onClose={() => setPendingResult(null)}>
+          <div className="flex flex-col gap-4">
+            <NumberField label="Down (1-4)" value={penaltyDown} onChange={setPenaltyDown} />
+            <NumberField label="Distance" value={penaltyDistance} onChange={setPenaltyDistance} />
+            <NumberField label="Field Position (1-99)" value={penaltyFieldPosition} onChange={setPenaltyFieldPosition} />
+            <button
+              type="button"
+              onClick={submitPenalty}
+              className="rounded-xl bg-indigo-600 px-4 py-4 text-lg font-bold text-white active:bg-indigo-700"
+            >
+              Log Penalty
+            </button>
+          </div>
+        </Sheet>
+      )}
+    </main>
+  );
+}
+
+function GameTypeButtons({
+  onSelect,
+  disabled,
+}: {
+  onSelect: (t: GameType) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div className="flex w-full flex-col gap-3">
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => onSelect("real")}
+        className="rounded-2xl bg-sky-600 px-8 py-6 text-xl font-bold text-white active:bg-sky-700 disabled:opacity-50"
+      >
+        Real Game
+      </button>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => onSelect("practice")}
+        className="rounded-2xl bg-indigo-600 px-8 py-6 text-xl font-bold text-white active:bg-indigo-700 disabled:opacity-50"
+      >
+        Practice / Training
+      </button>
+    </div>
+  );
+}
+
+function NewGameButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="rounded-full border border-slate-600 px-3 py-1 text-xs font-medium uppercase tracking-wide text-slate-300 active:bg-slate-800"
+    >
+      New Game
+    </button>
+  );
+}
+
+function PracticeBanner() {
+  return (
+    <div className="rounded-xl bg-indigo-600 px-4 py-2 text-center text-sm font-bold uppercase tracking-widest text-white">
+      Practice Mode
+    </div>
+  );
+}
+
+function ModeToggle({
+  mode,
+  onChange,
+  disabled,
+}: {
+  mode: Mode;
+  onChange: (m: Mode) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      {(["OFFENSE", "DEFENSE"] as const).map((m) => (
+        <button
+          key={m}
+          type="button"
+          disabled={disabled}
+          onClick={() => onChange(m)}
+          className={[
+            "rounded-2xl px-4 py-4 text-lg font-bold disabled:opacity-50",
+            mode === m
+              ? "bg-slate-100 text-slate-900"
+              : "bg-slate-800 text-slate-400 active:bg-slate-700",
+          ].join(" ")}
+        >
+          {m}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function NumberField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">{label}</span>
+      <input
+        type="number"
+        inputMode="numeric"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="rounded-xl bg-slate-800 px-4 py-3 text-xl font-bold text-slate-50"
+      />
+    </label>
+  );
+}
+
+function NewDriveSheet({
+  fieldPosition,
+  setFieldPosition,
+  onClose,
+  onSubmit,
+}: {
+  fieldPosition: string;
+  setFieldPosition: (v: string) => void;
+  onClose: () => void;
+  onSubmit: () => void;
+}) {
+  const fp = Number(fieldPosition);
+  const valid = Number.isInteger(fp) && fp >= 1 && fp <= 99;
+  return (
+    <Sheet title="New Drive — P & 10" onClose={onClose}>
+      <div className="flex flex-col gap-4">
+        <NumberField label="Field Position (1-99, yards to opp. goal)" value={fieldPosition} onChange={setFieldPosition} />
+        {valid && <p className="text-sm text-slate-400">= {formatFieldPosition(fp)}</p>}
+        <button
+          type="button"
+          disabled={!valid}
+          onClick={onSubmit}
+          className="rounded-xl bg-sky-600 px-4 py-4 text-lg font-bold text-white active:bg-sky-700 disabled:opacity-50"
+        >
+          Start Drive
+        </button>
+      </div>
+    </Sheet>
+  );
+}
+
+function StatusPill({ status }: { status: TapStatus }) {
+  if (status === "idle") return null;
+  const text = { sending: "Sending…", sent: "Sent ✓", error: "Failed — retry tap" }[status];
+  const color =
+    status === "error"
+      ? "bg-red-950 text-red-300"
+      : status === "sent"
+        ? "bg-emerald-950 text-emerald-300"
+        : "bg-slate-800 text-slate-300";
+  return (
+    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${color}`}>{text}</span>
+  );
+}
