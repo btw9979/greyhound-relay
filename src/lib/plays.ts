@@ -1,19 +1,24 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type GameType = "real" | "practice";
+export type GameStatus = "in_progress" | "complete";
+export type Mode = "OFFENSE" | "DEFENSE";
 
 export interface Game {
   id: string;
   game_date: string;
   game_type: GameType;
+  status: GameStatus;
+  opponent: string | null;
+  is_home: boolean | null;
+  /** Which mode the game opens in before its first play — see startNewGame. */
+  starting_mode: Mode | null;
   created_at: string;
 }
 
 // "P" marks the first play of a new drive exclusively — every later down
 // within that drive is a concrete number, same as before.
 export type Down = 1 | 2 | 3 | 4 | "P";
-
-export type Mode = "OFFENSE" | "DEFENSE";
 export type Personnel = "CLEAN" | "SHORT" | "OVER";
 export type Flat = "SET" | "DEFENDER";
 export type Splits = "NONE" | "FLANKER_TIGHT" | "SLOT_TIGHT" | "BOTH_TIGHT";
@@ -190,17 +195,42 @@ export async function getCurrentGame(supabase: SupabaseClient): Promise<Game | n
   return data as Game | null;
 }
 
-/** Booth-only action: explicitly starts a new game of the given type. */
+export interface NewGameSetup {
+  gameType: GameType;
+  opponent: string;
+  isHome: boolean;
+  /** Which team receives the opening kickoff, as an initial mode. */
+  startingMode: Mode;
+}
+
+/** Booth-only action: explicitly starts a new game from the Game Setup Screen. */
 export async function startNewGame(
   supabase: SupabaseClient,
-  gameType: GameType,
+  setup: NewGameSetup,
 ): Promise<Game> {
   const { data, error } = await supabase
     .from("games")
-    .insert({ game_date: todaysLocalDate(), game_type: gameType })
+    .insert({
+      game_date: todaysLocalDate(),
+      game_type: setup.gameType,
+      status: "in_progress",
+      opponent: setup.opponent,
+      is_home: setup.isHome,
+      starting_mode: setup.startingMode,
+    })
     .select("*")
     .single();
 
   if (error) throw error;
   return data as Game;
+}
+
+/** Booth-only action: ends the current game. Requires its own confirmation upstream. */
+export async function endGame(supabase: SupabaseClient, gameId: string): Promise<void> {
+  const { error } = await supabase
+    .from("games")
+    .update({ status: "complete" })
+    .eq("id", gameId);
+
+  if (error) throw error;
 }

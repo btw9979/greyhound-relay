@@ -103,6 +103,16 @@ export default function SidelinePage() {
           setGame(payload.new as Game);
         },
       )
+      .on(
+        // Catches "End Game" (status -> complete) on the game already being
+        // followed, so the end-of-game summary appears live.
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "games" },
+        (payload) => {
+          const updated = payload.new as Game;
+          setGame((current) => (current && current.id === updated.id ? updated : current));
+        },
+      )
       .subscribe();
 
     return () => {
@@ -162,6 +172,43 @@ export default function SidelinePage() {
   const currentPlay = play && game && play.game_id === game.id ? play : null;
   const displayLastUpdate = currentPlay ? lastUpdate : null;
 
+  // Fetched once a game is marked complete: total scrimmage-play yardage
+  // by mode. result_yards is null for Penalty/Turnover/Score rows already
+  // (never populated for those results), so a plain sum naturally excludes
+  // them without extra filtering.
+  const [summary, setSummary] = useState<{ gameId: string; offenseYards: number; defenseYards: number } | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (!game || game.status !== "complete") return;
+    let cancelled = false;
+
+    (async () => {
+      const { data } = await supabase
+        .from("plays")
+        .select("mode, result_yards")
+        .eq("game_id", game.id);
+
+      if (cancelled || !data) return;
+      let offenseYards = 0;
+      let defenseYards = 0;
+      for (const row of data as { mode: "OFFENSE" | "DEFENSE"; result_yards: number | null }[]) {
+        if (row.result_yards === null) continue;
+        if (row.mode === "OFFENSE") offenseYards += row.result_yards;
+        else defenseYards += row.result_yards;
+      }
+      setSummary({ gameId: game.id, offenseYards, defenseYards });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [supabase, game]);
+
+  const currentSummary =
+    game && game.status === "complete" && summary?.gameId === game.id ? summary : null;
+
   useEffect(() => {
     const tick = () => {
       setElapsed(displayLastUpdate === null ? null : Math.floor((Date.now() - displayLastUpdate) / 1000));
@@ -190,13 +237,20 @@ export default function SidelinePage() {
         <p className="rounded-xl bg-red-950 px-4 py-3 text-sm text-red-300">{initError}</p>
       )}
 
-      {!currentPlay && !initError && (
+      {game?.status === "complete" && (
+        <GameSummary
+          offenseYards={currentSummary?.offenseYards ?? null}
+          defenseYards={currentSummary?.defenseYards ?? null}
+        />
+      )}
+
+      {game?.status !== "complete" && !currentPlay && !initError && (
         <p className="flex flex-1 items-center justify-center text-center text-slate-400">
           Waiting for the booth to start the game…
         </p>
       )}
 
-      {currentPlay && (
+      {game?.status !== "complete" && currentPlay && (
         <div className="flex flex-1 flex-col gap-3">
           <div className="grid min-h-[9dvh] flex-1 grid-cols-3 items-center gap-2 rounded-2xl bg-slate-900 px-3 py-3 text-center">
             <div className="flex flex-col">
@@ -275,8 +329,41 @@ export default function SidelinePage() {
         </div>
       )}
 
-      <FreshnessBar freshness={freshness} elapsed={elapsed} connected={connected} />
+      {game?.status !== "complete" && (
+        <FreshnessBar freshness={freshness} elapsed={elapsed} connected={connected} />
+      )}
     </main>
+  );
+}
+
+function GameSummary({
+  offenseYards,
+  defenseYards,
+}: {
+  offenseYards: number | null;
+  defenseYards: number | null;
+}) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
+      <div className="flex flex-col items-center gap-1 rounded-2xl border-4 border-black bg-slate-900 px-8 py-5">
+        <span className="text-3xl font-black uppercase tracking-widest text-slate-50">Final</span>
+        <span className="text-sm font-bold uppercase tracking-widest text-slate-400">Game Ended</span>
+      </div>
+      <div className="grid w-full grid-cols-2 gap-4">
+        <div className="flex flex-col items-center gap-1 rounded-2xl border-4 border-black/15 bg-emerald-400 px-4 py-6 text-black">
+          <span className="text-sm font-bold uppercase tracking-widest opacity-80">
+            Offense Yards
+          </span>
+          <span className="text-4xl font-black">{offenseYards ?? "—"}</span>
+        </div>
+        <div className="flex flex-col items-center gap-1 rounded-2xl border-4 border-black/15 bg-slate-800 px-4 py-6 text-slate-100">
+          <span className="text-sm font-bold uppercase tracking-widest opacity-80">
+            Yards Allowed
+          </span>
+          <span className="text-4xl font-black">{defenseYards ?? "—"}</span>
+        </div>
+      </div>
+    </div>
   );
 }
 

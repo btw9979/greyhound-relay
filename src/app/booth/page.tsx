@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/client";
 import {
   applyRunOrPassResult,
   attackingFieldPosition,
+  endGame,
   formatDownDistance,
   formatFieldPosition,
   getCurrentGame,
@@ -127,9 +128,21 @@ export default function BoothPage() {
   );
 
   const [sheet, setSheet] = useState<
-    "newDrive" | "result" | "newGame" | "confirmModeSwitch" | "confirmFieldPosition" | null
+    | "newDrive"
+    | "result"
+    | "manageGame"
+    | "gameSetup"
+    | "endGameConfirm"
+    | "confirmModeSwitch"
+    | "confirmFieldPosition"
+    | null
   >(null);
   const [newDriveField, setNewDriveField] = useState("");
+
+  const [setupGameType, setSetupGameType] = useState<GameType>("real");
+  const [setupOpponent, setSetupOpponent] = useState("");
+  const [setupHomeAway, setSetupHomeAway] = useState<"home" | "away">("home");
+  const [setupReceiving, setSetupReceiving] = useState<"us" | "opponent">("us");
 
   const [pendingResult, setPendingResult] = useState<ResultType | null>(null);
   const [yardageSign, setYardageSign] = useState<1 | -1>(1);
@@ -163,7 +176,14 @@ export default function BoothPage() {
           .limit(1)
           .maybeSingle();
 
-        if (!cancelled && latest) {
+        if (cancelled) return;
+
+        if (!latest) {
+          // No play logged yet for this game — reflect the mode chosen at
+          // setup (who received the opening kickoff) rather than defaulting
+          // to OFFENSE, so a reload before the first drive still shows it.
+          if (currentGame.starting_mode) setPendingMode(currentGame.starting_mode);
+        } else {
           const p = latest as Play;
           setPendingMode(p.mode);
           setState({
@@ -223,7 +243,12 @@ export default function BoothPage() {
     [game, userId, supabase],
   );
 
-  const disabled = !ready || !game || status === "sending";
+  // Play-logging controls are only ever live for a game that's actually
+  // in progress — a completed game (or no game at all) leaves everything
+  // visibly disabled, whether that's a fresh load or an "End Game" that
+  // just happened.
+  const inProgressGame = game?.status === "in_progress" ? game : null;
+  const disabled = !ready || !inProgressGame || status === "sending";
 
   function updateAndSend(patch: Partial<GameState>) {
     if (!state) return;
@@ -232,17 +257,44 @@ export default function BoothPage() {
     insert(next, null);
   }
 
-  async function beginNewGame(gameType: GameType) {
+  function openGameSetup() {
+    setSetupGameType("real");
+    setSetupOpponent("");
+    setSetupHomeAway("home");
+    setSetupReceiving("us");
+    setSheet("gameSetup");
+  }
+
+  async function submitGameSetup() {
+    const opponent = setupOpponent.trim();
+    if (!opponent) return;
+    const startingMode: Mode = setupReceiving === "us" ? "OFFENSE" : "DEFENSE";
     try {
-      const newGame = await startNewGame(supabase, gameType);
+      const newGame = await startNewGame(supabase, {
+        gameType: setupGameType,
+        opponent,
+        isHome: setupHomeAway === "home",
+        startingMode,
+      });
       setGame(newGame);
       setState(null);
-      setPendingMode("OFFENSE");
+      setPendingMode(startingMode);
       resetDriveFlow();
       setSheet(null);
       setInitError(null);
     } catch {
       setInitError("Couldn't start the game. Check connection and try again.");
+    }
+  }
+
+  async function confirmEndGame() {
+    if (!game) return;
+    try {
+      await endGame(supabase, game.id);
+      setGame({ ...game, status: "complete" });
+      setSheet(null);
+    } catch {
+      setInitError("Couldn't end the game. Check connection and try again.");
     }
   }
 
@@ -463,50 +515,33 @@ export default function BoothPage() {
     submitResult("PENALTY", null, { down: down as 1 | 2 | 3 | 4, distance, fieldPosition: fp });
   }
 
-  if (!game) {
-    return (
-      <main className="flex flex-1 flex-col gap-8 p-5">
-        <header className="flex items-center justify-between">
-          <h1 className="text-lg font-bold text-slate-50">Booth</h1>
-          <SwitchRole current="booth" />
-        </header>
-
-        {initError && (
-          <p className="rounded-xl bg-red-950 px-4 py-3 text-sm text-red-300">{initError}</p>
-        )}
-
-        <div className="flex flex-1 flex-col items-center justify-center gap-6">
-          <p className="text-sm font-semibold uppercase tracking-widest text-slate-400">
-            Start a game to begin
-          </p>
-          <GameTypeButtons disabled={!ready} onSelect={beginNewGame} />
-        </div>
-      </main>
-    );
-  }
-
   if (!state) {
     return (
       <main className="flex flex-1 flex-col gap-8 p-5">
         <header className="flex items-center justify-between">
           <h1 className="text-lg font-bold text-slate-50">Booth</h1>
           <div className="flex items-center gap-3">
-            <NewGameButton onClick={() => setSheet("newGame")} />
+            <ManageGameButton onClick={() => setSheet("manageGame")} />
             <SwitchRole current="booth" />
           </div>
         </header>
 
-        {game.game_type === "practice" && <PracticeBanner />}
+        {game?.game_type === "practice" && <PracticeBanner />}
 
         {initError && (
           <p className="rounded-xl bg-red-950 px-4 py-3 text-sm text-red-300">{initError}</p>
         )}
 
         <div className="flex flex-1 flex-col items-center justify-center gap-6">
-          <ModeToggle mode={pendingMode} onChange={setPendingMode} disabled={!ready} />
+          {!inProgressGame && (
+            <p className="text-sm font-semibold uppercase tracking-widest text-slate-400">
+              No active game — use Manage Game to start one
+            </p>
+          )}
+          <ModeToggle mode={pendingMode} onChange={setPendingMode} disabled={disabled} />
           <button
             type="button"
-            disabled={!ready}
+            disabled={disabled}
             onClick={selectManualP}
             className="rounded-2xl bg-sky-600 px-8 py-6 text-2xl font-bold text-white active:bg-sky-700 disabled:opacity-50"
           >
@@ -523,15 +558,32 @@ export default function BoothPage() {
           />
         )}
 
-        {sheet === "newGame" && (
-          <Sheet title="Start New Game" onClose={() => setSheet(null)}>
-            <div className="flex flex-col gap-4">
-              <p className="text-sm text-slate-400">
-                The current game&apos;s data is kept — this just starts a new one and makes it active.
-              </p>
-              <GameTypeButtons disabled={false} onSelect={beginNewGame} />
-            </div>
-          </Sheet>
+        {sheet === "manageGame" && (
+          <ManageGameSheet
+            inProgress={!!inProgressGame}
+            onClose={() => setSheet(null)}
+            onNewGame={openGameSetup}
+            onEndGame={() => setSheet("endGameConfirm")}
+          />
+        )}
+
+        {sheet === "gameSetup" && (
+          <GameSetupSheet
+            gameType={setupGameType}
+            setGameType={setSetupGameType}
+            opponent={setupOpponent}
+            setOpponent={setSetupOpponent}
+            homeAway={setupHomeAway}
+            setHomeAway={setSetupHomeAway}
+            receiving={setupReceiving}
+            setReceiving={setSetupReceiving}
+            onClose={() => setSheet(null)}
+            onSubmit={submitGameSetup}
+          />
+        )}
+
+        {sheet === "endGameConfirm" && (
+          <EndGameConfirmSheet onClose={() => setSheet(null)} onConfirm={confirmEndGame} />
         )}
       </main>
     );
@@ -543,12 +595,12 @@ export default function BoothPage() {
         <h1 className="text-lg font-bold text-slate-50">Booth</h1>
         <div className="flex items-center gap-3">
           <StatusPill status={status} />
-          <NewGameButton onClick={() => setSheet("newGame")} />
+          <ManageGameButton onClick={() => setSheet("manageGame")} />
           <SwitchRole current="booth" />
         </div>
       </header>
 
-      {game.game_type === "practice" && <PracticeBanner />}
+      {game?.game_type === "practice" && <PracticeBanner />}
 
       {initError && (
         <p className="rounded-xl bg-red-950 px-4 py-3 text-sm text-red-300">{initError}</p>
@@ -694,15 +746,32 @@ export default function BoothPage() {
         </Sheet>
       )}
 
-      {sheet === "newGame" && (
-        <Sheet title="Start New Game" onClose={() => setSheet(null)}>
-          <div className="flex flex-col gap-4">
-            <p className="text-sm text-slate-400">
-              The current game&apos;s data is kept — this just starts a new one and makes it active.
-            </p>
-            <GameTypeButtons disabled={false} onSelect={beginNewGame} />
-          </div>
-        </Sheet>
+      {sheet === "manageGame" && (
+        <ManageGameSheet
+          inProgress={!!inProgressGame}
+          onClose={() => setSheet(null)}
+          onNewGame={openGameSetup}
+          onEndGame={() => setSheet("endGameConfirm")}
+        />
+      )}
+
+      {sheet === "gameSetup" && (
+        <GameSetupSheet
+          gameType={setupGameType}
+          setGameType={setSetupGameType}
+          opponent={setupOpponent}
+          setOpponent={setSetupOpponent}
+          homeAway={setupHomeAway}
+          setHomeAway={setSetupHomeAway}
+          receiving={setupReceiving}
+          setReceiving={setSetupReceiving}
+          onClose={() => setSheet(null)}
+          onSubmit={submitGameSetup}
+        />
+      )}
+
+      {sheet === "endGameConfirm" && (
+        <EndGameConfirmSheet onClose={() => setSheet(null)} onConfirm={confirmEndGame} />
       )}
 
       {sheet === "result" && pendingResult === null && (
@@ -814,44 +883,165 @@ export default function BoothPage() {
   );
 }
 
-function GameTypeButtons({
-  onSelect,
-  disabled,
-}: {
-  onSelect: (t: GameType) => void;
-  disabled: boolean;
-}) {
-  return (
-    <div className="flex w-full flex-col gap-3">
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={() => onSelect("real")}
-        className="rounded-2xl bg-sky-600 px-8 py-6 text-xl font-bold text-white active:bg-sky-700 disabled:opacity-50"
-      >
-        Real Game
-      </button>
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={() => onSelect("practice")}
-        className="rounded-2xl bg-indigo-600 px-8 py-6 text-xl font-bold text-white active:bg-indigo-700 disabled:opacity-50"
-      >
-        Practice / Training
-      </button>
-    </div>
-  );
-}
-
-function NewGameButton({ onClick }: { onClick: () => void }) {
+function ManageGameButton({ onClick }: { onClick: () => void }) {
   return (
     <button
       type="button"
       onClick={onClick}
       className="rounded-full border border-slate-600 px-3 py-1 text-xs font-medium uppercase tracking-wide text-slate-300 active:bg-slate-800"
     >
-      New Game
+      Manage Game
     </button>
+  );
+}
+
+function ManageGameSheet({
+  inProgress,
+  onClose,
+  onNewGame,
+  onEndGame,
+}: {
+  inProgress: boolean;
+  onClose: () => void;
+  onNewGame: () => void;
+  onEndGame: () => void;
+}) {
+  return (
+    <Sheet title="Manage Game" onClose={onClose}>
+      <div className="flex flex-col gap-3">
+        <button
+          type="button"
+          disabled={inProgress}
+          onClick={onNewGame}
+          className="rounded-xl bg-sky-600 px-4 py-4 text-lg font-bold text-white active:bg-sky-700 disabled:opacity-40"
+        >
+          New Game
+        </button>
+        <button
+          type="button"
+          disabled={!inProgress}
+          onClick={onEndGame}
+          className="rounded-xl bg-red-600 px-4 py-4 text-lg font-bold text-white active:bg-red-700 disabled:opacity-40"
+        >
+          End Game
+        </button>
+      </div>
+    </Sheet>
+  );
+}
+
+function GameSetupSheet({
+  gameType,
+  setGameType,
+  opponent,
+  setOpponent,
+  homeAway,
+  setHomeAway,
+  receiving,
+  setReceiving,
+  onClose,
+  onSubmit,
+}: {
+  gameType: GameType;
+  setGameType: (v: GameType) => void;
+  opponent: string;
+  setOpponent: (v: string) => void;
+  homeAway: "home" | "away";
+  setHomeAway: (v: "home" | "away") => void;
+  receiving: "us" | "opponent";
+  setReceiving: (v: "us" | "opponent") => void;
+  onClose: () => void;
+  onSubmit: () => void;
+}) {
+  const valid = opponent.trim().length > 0;
+  return (
+    <Sheet title="New Game" onClose={onClose}>
+      <div className="flex flex-col gap-4">
+        <ToggleRow
+          label="Game Type"
+          value={gameType}
+          disabled={false}
+          onSelect={setGameType}
+          options={[
+            { value: "real", text: "Real Game", clean: true },
+            { value: "practice", text: "Practice", clean: true },
+          ]}
+        />
+        <label className="flex flex-col gap-1">
+          <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">
+            Opponent
+          </span>
+          <input
+            type="text"
+            value={opponent}
+            onChange={(e) => setOpponent(e.target.value)}
+            placeholder="Opponent name"
+            className="rounded-xl bg-slate-800 px-4 py-3 text-lg font-bold text-slate-50"
+          />
+        </label>
+        <ToggleRow
+          label="Home / Away"
+          value={homeAway}
+          disabled={false}
+          onSelect={setHomeAway}
+          options={[
+            { value: "home", text: "Home", clean: true },
+            { value: "away", text: "Away", clean: true },
+          ]}
+        />
+        <ToggleRow
+          label="Who receives the opening kickoff?"
+          value={receiving}
+          disabled={false}
+          onSelect={setReceiving}
+          options={[
+            { value: "us", text: "Us", clean: true },
+            { value: "opponent", text: "Opponent", clean: true },
+          ]}
+        />
+        <button
+          type="button"
+          disabled={!valid}
+          onClick={onSubmit}
+          className="rounded-xl bg-sky-600 px-4 py-4 text-lg font-bold text-white active:bg-sky-700 disabled:opacity-50"
+        >
+          Start Game
+        </button>
+      </div>
+    </Sheet>
+  );
+}
+
+function EndGameConfirmSheet({
+  onClose,
+  onConfirm,
+}: {
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Sheet title="End Game" onClose={onClose}>
+      <div className="flex flex-col gap-4">
+        <p className="text-lg text-slate-200">
+          End the current game? Play-logging will lock until a new game is started. This can&apos;t
+          be undone from the app.
+        </p>
+        <button
+          type="button"
+          onClick={onConfirm}
+          className="rounded-xl bg-red-600 px-4 py-4 text-lg font-bold text-white active:bg-red-700"
+        >
+          End Game
+        </button>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-xl bg-slate-800 px-4 py-4 text-lg font-semibold text-slate-300 active:bg-slate-700"
+        >
+          Cancel
+        </button>
+      </div>
+    </Sheet>
   );
 }
 
