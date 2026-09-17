@@ -96,7 +96,11 @@ export function formatDownDistance(
   distance: number,
   fieldPosition: number,
 ): string {
-  const label = down === "P" ? "P" : (["", "1st", "2nd", "3rd", "4th"][down] ?? `${down}th`);
+  // P is exclusively a first-play-of-drive marker — down is always 1, and P
+  // always wins over Goal on that first play regardless of field position.
+  // Goal-to-go logic only ever applies from the second play of a drive on.
+  if (down === "P") return "1 & P";
+  const label = ["", "1st", "2nd", "3rd", "4th"][down] ?? `${down}th`;
   if (distance <= 0) return `${label} & Goal`;
   const goalToGo = attackingFieldPosition(mode, fieldPosition) <= distance;
   return goalToGo ? `${label} & Goal` : `${label} & ${distance}`;
