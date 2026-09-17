@@ -27,6 +27,7 @@ export type ResultType =
   | "RUN"
   | "PASS_COMPLETE"
   | "PASS_INCOMPLETE"
+  | "SACK"
   | "PENALTY"
   | "TURNOVER"
   | "SCORE";

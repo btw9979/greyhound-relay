@@ -177,10 +177,17 @@ export default function SidelinePage() {
   // Fetched once a game is marked complete: total scrimmage-play yardage
   // by mode. result_yards is null for Penalty/Turnover/Score rows already
   // (never populated for those results), so a plain sum naturally excludes
-  // them without extra filtering.
-  const [summary, setSummary] = useState<{ gameId: string; offenseYards: number; defenseYards: number } | null>(
-    null,
-  );
+  // them without extra filtering. Sack yards are also summed separately
+  // (filtered to result_type = 'SACK') without changing the combined
+  // totals above — a sack's result_yards still counts toward them exactly
+  // as it always has.
+  const [summary, setSummary] = useState<{
+    gameId: string;
+    offenseYards: number;
+    defenseYards: number;
+    sackYardsLost: number;
+    sackYardsGained: number;
+  } | null>(null);
 
   useEffect(() => {
     if (!game || game.status !== "complete") return;
@@ -189,18 +196,28 @@ export default function SidelinePage() {
     (async () => {
       const { data } = await supabase
         .from("plays")
-        .select("mode, result_yards")
+        .select("mode, result_type, result_yards")
         .eq("game_id", game.id);
 
       if (cancelled || !data) return;
       let offenseYards = 0;
       let defenseYards = 0;
-      for (const row of data as { mode: "OFFENSE" | "DEFENSE"; result_yards: number | null }[]) {
+      let sackYardsLost = 0;
+      let sackYardsGained = 0;
+      for (const row of data as {
+        mode: "OFFENSE" | "DEFENSE";
+        result_type: string | null;
+        result_yards: number | null;
+      }[]) {
         if (row.result_yards === null) continue;
         if (row.mode === "OFFENSE") offenseYards += row.result_yards;
         else defenseYards += row.result_yards;
+
+        if (row.result_type !== "SACK") continue;
+        if (row.mode === "OFFENSE") sackYardsLost += row.result_yards;
+        else sackYardsGained += row.result_yards;
       }
-      setSummary({ gameId: game.id, offenseYards, defenseYards });
+      setSummary({ gameId: game.id, offenseYards, defenseYards, sackYardsLost, sackYardsGained });
     })();
 
     return () => {
@@ -248,6 +265,8 @@ export default function SidelinePage() {
         <GameSummary
           offenseYards={currentSummary?.offenseYards ?? null}
           defenseYards={currentSummary?.defenseYards ?? null}
+          sackYardsLost={currentSummary?.sackYardsLost ?? null}
+          sackYardsGained={currentSummary?.sackYardsGained ?? null}
           onLogout={handleLogout}
         />
       )}
@@ -347,10 +366,14 @@ export default function SidelinePage() {
 function GameSummary({
   offenseYards,
   defenseYards,
+  sackYardsLost,
+  sackYardsGained,
   onLogout,
 }: {
   offenseYards: number | null;
   defenseYards: number | null;
+  sackYardsLost: number | null;
+  sackYardsGained: number | null;
   onLogout: () => void;
 }) {
   return (
@@ -371,6 +394,20 @@ function GameSummary({
             Yards Allowed
           </span>
           <span className="text-4xl font-black">{defenseYards ?? "—"}</span>
+        </div>
+      </div>
+      <div className="grid w-full grid-cols-2 gap-4">
+        <div className="flex flex-col items-center gap-1 rounded-2xl border-4 border-black/15 bg-emerald-400 px-4 py-6 text-black">
+          <span className="text-sm font-bold uppercase tracking-widest opacity-80">
+            Sack Yards Lost
+          </span>
+          <span className="text-4xl font-black">{sackYardsLost ?? "—"}</span>
+        </div>
+        <div className="flex flex-col items-center gap-1 rounded-2xl border-4 border-black/15 bg-slate-800 px-4 py-6 text-slate-100">
+          <span className="text-sm font-bold uppercase tracking-widest opacity-80">
+            Sack Yards Gained
+          </span>
+          <span className="text-4xl font-black">{sackYardsGained ?? "—"}</span>
         </div>
       </div>
 

@@ -102,6 +102,7 @@ const RESULT_LABELS: Record<ResultType, string> = {
   RUN: "Run",
   PASS_COMPLETE: "Pass Complete",
   PASS_INCOMPLETE: "Pass Incomplete",
+  SACK: "Sack",
   PENALTY: "Penalty",
   TURNOVER: "Turnover",
   SCORE: "TD",
@@ -466,7 +467,7 @@ export default function BoothPage() {
     return true;
   }
 
-  function submitRunOrPass(type: "RUN" | "PASS_COMPLETE") {
+  function submitRunOrPass(type: "RUN" | "PASS_COMPLETE" | "SACK") {
     if (!state) return;
     const fromMode = state.mode;
     const gain = Number(yardageMagnitude) * yardageSign;
@@ -796,7 +797,7 @@ export default function BoothPage() {
       {sheet === "result" && pendingResult === null && (
         <Sheet title="Result" onClose={() => setSheet(null)}>
           <div className="grid grid-cols-2 gap-3">
-            {(["RUN", "PASS_COMPLETE"] as const).map((t) => (
+            {(["RUN", "PASS_COMPLETE", "SACK"] as const).map((t) => (
               <button
                 key={t}
                 type="button"
@@ -838,7 +839,8 @@ export default function BoothPage() {
         </Sheet>
       )}
 
-      {sheet === "result" && (pendingResult === "RUN" || pendingResult === "PASS_COMPLETE") && (
+      {sheet === "result" &&
+        (pendingResult === "RUN" || pendingResult === "PASS_COMPLETE" || pendingResult === "SACK") && (
         <Sheet title={`${RESULT_LABELS[pendingResult]} — Yardage`} onClose={() => setPendingResult(null)}>
           <div className="flex flex-col gap-4">
             <div className="grid grid-cols-2 gap-3">
