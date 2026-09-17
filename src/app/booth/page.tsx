@@ -429,7 +429,7 @@ export default function BoothPage() {
     setYardageSign(1);
     setYardageMagnitude("0");
     if (state) {
-      // A penalty can happen on the P & 10 play itself — fall back to a
+      // A penalty can happen on the 1 & P play itself — fall back to a
       // real number rather than prefilling the literal "P".
       setPenaltyDown(state.down === "P" ? String(DEFAULT_DOWN) : String(state.down));
       setPenaltyDistance(String(state.distance));
@@ -567,7 +567,7 @@ export default function BoothPage() {
             onClick={selectManualP}
             className="rounded-2xl bg-sky-600 px-8 py-6 text-2xl font-bold text-white active:bg-sky-700 disabled:opacity-50"
           >
-            START DRIVE (P &amp; 10)
+            START DRIVE (1 &amp; P)
           </button>
         </div>
 
@@ -643,7 +643,7 @@ export default function BoothPage() {
         onClick={selectManualP}
         className="rounded-xl bg-slate-800 px-4 py-3 text-sm font-semibold text-slate-300 active:bg-slate-700 disabled:opacity-50"
       >
-        NEW DRIVE (P &amp; 10)
+        NEW DRIVE (1 &amp; P)
       </button>
 
       <ExceptionToggle
@@ -724,7 +724,7 @@ export default function BoothPage() {
             <p className="text-lg text-slate-200">
               Switching to <span className="font-bold">{pendingDriveMode}</span> will start Drive{" "}
               <span className="font-bold">{state.driveNumber + 1}</span> at{" "}
-              <span className="font-bold">P &amp; 10</span>. Continue?
+              <span className="font-bold">1 &amp; P</span>. Continue?
             </p>
             <button
               type="button"
@@ -1161,7 +1161,7 @@ function NewDriveSheet({
   const fp = Number(fieldPosition);
   const valid = Number.isInteger(fp) && fp >= 1 && fp <= 99;
   return (
-    <Sheet title="New Drive — P & 10" onClose={onClose}>
+    <Sheet title="New Drive — 1 & P" onClose={onClose}>
       <div className="flex flex-col gap-4">
         <NumberField label="Field Position (1-99, yards to opp. goal)" value={fieldPosition} onChange={setFieldPosition} />
         {valid && <p className="text-sm text-slate-400">= {formatFieldPosition(fp)}</p>}
