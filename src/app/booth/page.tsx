@@ -470,7 +470,11 @@ export default function BoothPage() {
   function submitRunOrPass(type: "RUN" | "PASS_COMPLETE" | "SACK") {
     if (!state) return;
     const fromMode = state.mode;
-    const gain = Number(yardageMagnitude) * yardageSign;
+    // A sack can't be a gain — enforced here regardless of yardageSign so a
+    // stale toggle state (the Gain/Loss buttons aren't even shown for SACK)
+    // can never submit a positive value.
+    const sign = type === "SACK" ? -1 : yardageSign;
+    const gain = Number(yardageMagnitude) * sign;
     if (!Number.isFinite(gain)) return;
     const calc = applyRunOrPassResult({
       mode: state.mode,
@@ -843,28 +847,34 @@ export default function BoothPage() {
         (pendingResult === "RUN" || pendingResult === "PASS_COMPLETE" || pendingResult === "SACK") && (
         <Sheet title={`${RESULT_LABELS[pendingResult]} — Yardage`} onClose={() => setPendingResult(null)}>
           <div className="flex flex-col gap-4">
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                type="button"
-                onClick={() => setYardageSign(1)}
-                className={[
-                  "rounded-xl px-4 py-4 text-lg font-bold",
-                  yardageSign === 1 ? "bg-emerald-500 text-emerald-950" : "bg-slate-800 text-slate-300",
-                ].join(" ")}
-              >
-                GAIN
-              </button>
-              <button
-                type="button"
-                onClick={() => setYardageSign(-1)}
-                className={[
-                  "rounded-xl px-4 py-4 text-lg font-bold",
-                  yardageSign === -1 ? "bg-red-500 text-red-950" : "bg-slate-800 text-slate-300",
-                ].join(" ")}
-              >
-                LOSS
-              </button>
-            </div>
+            {pendingResult === "SACK" ? (
+              <p className="text-center text-sm font-semibold uppercase tracking-widest text-red-400">
+                Loss
+              </p>
+            ) : (
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setYardageSign(1)}
+                  className={[
+                    "rounded-xl px-4 py-4 text-lg font-bold",
+                    yardageSign === 1 ? "bg-emerald-500 text-emerald-950" : "bg-slate-800 text-slate-300",
+                  ].join(" ")}
+                >
+                  GAIN
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setYardageSign(-1)}
+                  className={[
+                    "rounded-xl px-4 py-4 text-lg font-bold",
+                    yardageSign === -1 ? "bg-red-500 text-red-950" : "bg-slate-800 text-slate-300",
+                  ].join(" ")}
+                >
+                  LOSS
+                </button>
+              </div>
+            )}
             <input
               type="number"
               inputMode="numeric"
