@@ -49,20 +49,15 @@ const TILE_TONE = {
     icon: "‼",
     box: "animate-pulse border-[6px] border-black bg-red-600 text-white",
   },
-  // Purely informational — every value is equally valid, so no clean/alert
-  // coloring, just a plain neutral box.
-  neutral: {
-    icon: "•",
-    box: "border-4 border-black/15 bg-slate-900 text-slate-100",
-  },
 } as const;
 
-// The two most urgent/actionable fields (Personnel, Flat/Formation) — sized
-// by flex-grow rather than a fixed dvh so they automatically take whatever
-// vertical space is actually available for however many fields are active,
-// instead of assuming a fixed tile count. min-h-0 overrides flexbox's
-// default min-height: auto, which would otherwise refuse to let this shrink
-// below its content size and defeat the fit-one-screen guarantee.
+// The two highest-priority fields for the current mode (3-Tech/Flat on
+// offense, Personnel/Formation on defense) — sized by flex-grow rather than
+// a fixed dvh so they automatically take whatever vertical space is
+// actually available for however many fields are active, instead of
+// assuming a fixed tile count. min-h-0 overrides flexbox's default
+// min-height: auto, which would otherwise refuse to let this shrink below
+// its content size and defeat the fit-one-screen guarantee.
 function Tile({
   label,
   text,
@@ -86,9 +81,10 @@ function Tile({
   );
 }
 
-// Lower-urgency informational fields (Splits, 3-Tech) — paired side-by-side
-// in one shared row rather than each claiming a full-width block, so they
-// stay legible without competing with Personnel/Flat/Formation for space.
+// Lower-priority fields for the current mode (Personnel/Splits on offense) —
+// paired side-by-side in one shared row rather than each claiming a
+// full-width block, so they stay legible without competing with the
+// higher-priority fields above for space.
 function CompactTile({
   label,
   text,
@@ -352,55 +348,65 @@ export default function SidelinePage() {
           </div>
 
           {/* Fills whatever vertical space remains after the top bar and
-              freshness bar — Personnel/Flat/Formation get 3 parts each,
-              the paired Splits/3-Tech row gets 2, so the split adjusts
-              automatically whether 2 or 3 rows are actually present. */}
+              freshness bar. Offense priority: 3-Tech (the most actionable
+              read — tells staff whether an edge attack is live) and Flat
+              get the two large tiles; Personnel/Splits are lower priority
+              and paired into the small shared row. Defense is unchanged:
+              Personnel/Formation both stay large, no third row. */}
           <div className="flex min-h-0 flex-1 flex-col gap-3">
-            <Tile
-              label="Personnel"
-              text={
-                currentPlay.personnel === "CLEAN"
-                  ? "11 ON FIELD"
-                  : currentPlay.personnel === "SHORT"
-                    ? "SHORT"
-                    : "OVER"
-              }
-              tone={currentPlay.personnel === "CLEAN" ? "clean" : currentPlay.personnel === "SHORT" ? "alert" : "urgent"}
-            />
-
             {currentPlay.mode === "OFFENSE" ? (
-              <Tile
-                label="Flat"
-                text={FLAT_LABELS[currentPlay.flat ?? "SET"]}
-                tone={currentPlay.flat === "DEFENDER" ? "alert" : "clean"}
-              />
-            ) : (
-              <Tile
-                label="Formation"
-                text={FORMATION_LABELS[currentPlay.formation ?? "OPEN"]}
-                tone={currentPlay.formation === "CLOSED" ? "alert" : "clean"}
-              />
-            )}
-
-            {currentPlay.mode === "OFFENSE" && (() => {
-              const flagged = currentPlay.splits && currentPlay.splits !== "NONE";
-              return (
+              <>
+                <Tile
+                  label="3-Tech"
+                  text={THREE_TECH_LABELS[currentPlay.three_tech ?? "FIELD"]}
+                  tone={currentPlay.three_tech === "FIELD" || currentPlay.three_tech === null ? "clean" : "alert"}
+                />
+                <Tile
+                  label="Flat"
+                  text={FLAT_LABELS[currentPlay.flat ?? "SET"]}
+                  tone={currentPlay.flat === "DEFENDER" ? "alert" : "clean"}
+                />
                 <div className="flex min-h-0 flex-[2] gap-3">
+                  <CompactTile
+                    label="Personnel"
+                    text={
+                      currentPlay.personnel === "CLEAN"
+                        ? "11 ON FIELD"
+                        : currentPlay.personnel === "SHORT"
+                          ? "SHORT"
+                          : "OVER"
+                    }
+                    icon={currentPlay.personnel === "CLEAN" ? "✓" : "⚠"}
+                    flagged={currentPlay.personnel !== "CLEAN"}
+                  />
                   <CompactTile
                     label="Splits"
                     text={SPLITS_LABELS[currentPlay.splits ?? "NONE"]}
-                    icon={flagged ? "⚠" : "✓"}
-                    flagged={!!flagged}
-                  />
-                  <CompactTile
-                    label="3-Tech"
-                    text={THREE_TECH_LABELS[currentPlay.three_tech ?? "HEADS_UP"]}
-                    icon="•"
-                    flagged={false}
+                    icon={currentPlay.splits && currentPlay.splits !== "NONE" ? "⚠" : "✓"}
+                    flagged={!!(currentPlay.splits && currentPlay.splits !== "NONE")}
                   />
                 </div>
-              );
-            })()}
+              </>
+            ) : (
+              <>
+                <Tile
+                  label="Personnel"
+                  text={
+                    currentPlay.personnel === "CLEAN"
+                      ? "11 ON FIELD"
+                      : currentPlay.personnel === "SHORT"
+                        ? "SHORT"
+                        : "OVER"
+                  }
+                  tone={currentPlay.personnel === "CLEAN" ? "clean" : currentPlay.personnel === "SHORT" ? "alert" : "urgent"}
+                />
+                <Tile
+                  label="Formation"
+                  text={FORMATION_LABELS[currentPlay.formation ?? "OPEN"]}
+                  tone={currentPlay.formation === "CLOSED" ? "alert" : "clean"}
+                />
+              </>
+            )}
           </div>
         </div>
       )}

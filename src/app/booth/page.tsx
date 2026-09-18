@@ -759,15 +759,17 @@ export default function BoothPage() {
               { value: "R", text: "R" },
             ]}
           />
-          <SelectRow
+          <ExceptionToggle
             label="3-Tech"
             value={state.threeTech}
+            defaultValue={DEFAULT_THREE_TECH}
+            defaultText="Field"
+            flagText="⚠ 3-TECH ALIGN"
             disabled={disabled}
             onSelect={(v) => updateAndSend({ threeTech: v })}
             options={[
-              { value: "FIELD", text: "Field" },
-              { value: "BOUNDARY", text: "Boundary" },
-              { value: "HEADS_UP", text: "Heads-Up" },
+              { value: "BOUNDARY", text: "Boundary", severity: "alert" },
+              { value: "HEADS_UP", text: "Heads-Up", severity: "alert" },
             ]}
           />
         </>

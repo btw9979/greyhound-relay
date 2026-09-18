@@ -74,11 +74,14 @@ export const DEFAULT_PERSONNEL: Personnel = "CLEAN";
 export const DEFAULT_FLAT: Flat = "SET";
 export const DEFAULT_SPLITS: Splits = "NONE";
 export const DEFAULT_FORMATION: Formation = "OPEN";
-// Hash and 3-Tech have no "normal" value the way Flat/Splits/Formation do —
-// every snap needs a real, deliberately-tapped read for both. These are
-// only the initial selection shown before the booth taps anything.
+// Hash has no "normal" value the way Flat/Splits/Formation do — every snap
+// needs a real, deliberately-tapped read, so this is only the initial
+// selection shown before the booth taps anything.
 export const DEFAULT_HASH: Hash = "M";
-export const DEFAULT_THREE_TECH: ThreeTech = "HEADS_UP";
+// Field is by far the most common 3-Tech alignment, so — unlike Hash — this
+// is a real assumed-correct default: the booth only taps when it's Boundary
+// or Heads-Up, same exception pattern as Personnel/Splits.
+export const DEFAULT_THREE_TECH: ThreeTech = "FIELD";
 
 /** Human-readable "Own 25" / "Opp 40" for a 1-99 yards-to-goal value. */
 export function formatFieldPosition(fieldPosition: number): string {
