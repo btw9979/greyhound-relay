@@ -13,6 +13,9 @@ export interface Game {
   is_home: boolean | null;
   /** Which mode the game opens in before its first play — see startNewGame. */
   starting_mode: Mode | null;
+  /** Null until End Game is confirmed; editable afterward from the EoG summary. */
+  final_score_us: number | null;
+  final_score_opponent: number | null;
   created_at: string;
 }
 
@@ -242,12 +245,89 @@ export async function startNewGame(
   return data as Game;
 }
 
+export interface FinalScore {
+  us: number;
+  opponent: number;
+}
+
 /** Booth-only action: ends the current game. Requires its own confirmation upstream. */
-export async function endGame(supabase: SupabaseClient, gameId: string): Promise<void> {
+export async function endGame(
+  supabase: SupabaseClient,
+  gameId: string,
+  finalScore: FinalScore,
+): Promise<void> {
   const { error } = await supabase
     .from("games")
-    .update({ status: "complete" })
+    .update({
+      status: "complete",
+      final_score_us: finalScore.us,
+      final_score_opponent: finalScore.opponent,
+    })
     .eq("id", gameId);
 
   if (error) throw error;
+}
+
+/** Corrects a final score already recorded by End Game, from the EoG summary. */
+export async function updateFinalScore(
+  supabase: SupabaseClient,
+  gameId: string,
+  finalScore: FinalScore,
+): Promise<void> {
+  const { error } = await supabase
+    .from("games")
+    .update({ final_score_us: finalScore.us, final_score_opponent: finalScore.opponent })
+    .eq("id", gameId);
+
+  if (error) throw error;
+}
+
+/** Team-level scrimmage stats for one side of the ball (offense or defense). */
+export interface SideStats {
+  rushYards: number;
+  passYards: number;
+  sackCount: number;
+  /** Always <= 0 — yardage lost on sacks, signed the same way result_yards is stored. */
+  sackYards: number;
+  /** NFHS/NCAA "Total Offense"/"Total Defense": rush + pass + sackYards (sackYards already negative). */
+  total: number;
+}
+
+export interface GameStats {
+  offense: SideStats;
+  defense: SideStats;
+}
+
+function emptySideStats(): SideStats {
+  return { rushYards: 0, passYards: 0, sackCount: 0, sackYards: 0, total: 0 };
+}
+
+/**
+ * Builds the EoG summary's Offense/Defense stat tables from the game's full
+ * play log. Only RUN, PASS_COMPLETE, and SACK rows contribute — the other
+ * result types (and presnap-only rows, where result_type is null) carry no
+ * yardage relevant to Total Offense/Defense.
+ */
+export function computeGameStats(
+  plays: { mode: Mode; result_type: ResultType | null; result_yards: number | null }[],
+): GameStats {
+  const offense = emptySideStats();
+  const defense = emptySideStats();
+
+  for (const row of plays) {
+    if (row.result_yards === null) continue;
+    const side = row.mode === "OFFENSE" ? offense : defense;
+    if (row.result_type === "RUN") side.rushYards += row.result_yards;
+    else if (row.result_type === "PASS_COMPLETE") side.passYards += row.result_yards;
+    else if (row.result_type === "SACK") {
+      side.sackCount += 1;
+      side.sackYards += row.result_yards;
+    }
+  }
+
+  for (const side of [offense, defense]) {
+    side.total = side.rushYards + side.passYards + side.sackYards;
+  }
+
+  return { offense, defense };
 }

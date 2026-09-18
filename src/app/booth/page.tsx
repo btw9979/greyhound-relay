@@ -201,6 +201,9 @@ export default function BoothPage() {
   const [setupHomeAway, setSetupHomeAway] = useState<"home" | "away">("home");
   const [setupReceiving, setSetupReceiving] = useState<"us" | "opponent">("us");
 
+  const [endGameScoreUs, setEndGameScoreUs] = useState("");
+  const [endGameScoreOpponent, setEndGameScoreOpponent] = useState("");
+
   const [pendingResult, setPendingResult] = useState<ResultType | null>(null);
   const [yardageSign, setYardageSign] = useState<1 | -1>(1);
   const [yardageMagnitude, setYardageMagnitude] = useState("0");
@@ -348,11 +351,20 @@ export default function BoothPage() {
     }
   }
 
+  function openEndGameConfirm() {
+    setEndGameScoreUs("");
+    setEndGameScoreOpponent("");
+    setSheet("endGameConfirm");
+  }
+
   async function confirmEndGame() {
     if (!game) return;
+    const us = Number(endGameScoreUs);
+    const opponent = Number(endGameScoreOpponent);
+    if (!Number.isInteger(us) || us < 0 || !Number.isInteger(opponent) || opponent < 0) return;
     try {
-      await endGame(supabase, game.id);
-      setGame({ ...game, status: "complete" });
+      await endGame(supabase, game.id, { us, opponent });
+      setGame({ ...game, status: "complete", final_score_us: us, final_score_opponent: opponent });
       setSheet(null);
     } catch {
       setInitError("Couldn't end the game. Check connection and try again.");
@@ -647,7 +659,7 @@ export default function BoothPage() {
             inProgress={!!inProgressGame}
             onClose={() => setSheet(null)}
             onNewGame={openGameSetup}
-            onEndGame={() => setSheet("endGameConfirm")}
+            onEndGame={openEndGameConfirm}
             onLogout={handleLogout}
           />
         )}
@@ -668,7 +680,14 @@ export default function BoothPage() {
         )}
 
         {sheet === "endGameConfirm" && (
-          <EndGameConfirmSheet onClose={() => setSheet(null)} onConfirm={confirmEndGame} />
+          <EndGameConfirmSheet
+            scoreUs={endGameScoreUs}
+            setScoreUs={setEndGameScoreUs}
+            scoreOpponent={endGameScoreOpponent}
+            setScoreOpponent={setEndGameScoreOpponent}
+            onClose={() => setSheet(null)}
+            onConfirm={confirmEndGame}
+          />
         )}
       </main>
     );
@@ -860,7 +879,7 @@ export default function BoothPage() {
           inProgress={!!inProgressGame}
           onClose={() => setSheet(null)}
           onNewGame={openGameSetup}
-          onEndGame={() => setSheet("endGameConfirm")}
+          onEndGame={openEndGameConfirm}
           onLogout={handleLogout}
         />
       )}
@@ -881,7 +900,14 @@ export default function BoothPage() {
       )}
 
       {sheet === "endGameConfirm" && (
-        <EndGameConfirmSheet onClose={() => setSheet(null)} onConfirm={confirmEndGame} />
+        <EndGameConfirmSheet
+          scoreUs={endGameScoreUs}
+          setScoreUs={setEndGameScoreUs}
+          scoreOpponent={endGameScoreOpponent}
+          setScoreOpponent={setEndGameScoreOpponent}
+          onClose={() => setSheet(null)}
+          onConfirm={confirmEndGame}
+        />
       )}
 
       {sheet === "result" && pendingResult === null && (
@@ -1139,12 +1165,25 @@ function GameSetupSheet({
 }
 
 function EndGameConfirmSheet({
+  scoreUs,
+  setScoreUs,
+  scoreOpponent,
+  setScoreOpponent,
   onClose,
   onConfirm,
 }: {
+  scoreUs: string;
+  setScoreUs: (v: string) => void;
+  scoreOpponent: string;
+  setScoreOpponent: (v: string) => void;
   onClose: () => void;
   onConfirm: () => void;
 }) {
+  const validScore = (v: string) => {
+    const n = Number(v);
+    return v.trim() !== "" && Number.isInteger(n) && n >= 0;
+  };
+  const valid = validScore(scoreUs) && validScore(scoreOpponent);
   return (
     <Sheet title="End Game" onClose={onClose}>
       <div className="flex flex-col gap-4">
@@ -1152,10 +1191,15 @@ function EndGameConfirmSheet({
           End the current game? Play-logging will lock until a new game is started. This can&apos;t
           be undone from the app.
         </p>
+        <div className="grid grid-cols-2 gap-3">
+          <NumberField label="Final Score — Us" value={scoreUs} onChange={setScoreUs} />
+          <NumberField label="Final Score — Opponent" value={scoreOpponent} onChange={setScoreOpponent} />
+        </div>
         <button
           type="button"
+          disabled={!valid}
           onClick={onConfirm}
-          className="rounded-xl bg-red-600 px-4 py-4 text-lg font-bold text-white active:bg-red-700"
+          className="rounded-xl bg-red-600 px-4 py-4 text-lg font-bold text-white active:bg-red-700 disabled:opacity-50"
         >
           End Game
         </button>

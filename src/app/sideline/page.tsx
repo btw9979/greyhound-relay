@@ -3,8 +3,14 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { getCurrentGame, formatDownDistance, formatFieldPosition } from "@/lib/plays";
-import type { Game, Play } from "@/lib/plays";
+import {
+  getCurrentGame,
+  formatDownDistance,
+  formatFieldPosition,
+  computeGameStats,
+  updateFinalScore,
+} from "@/lib/plays";
+import type { Game, Play, GameStats } from "@/lib/plays";
 import { SwitchRole } from "@/components/SwitchRole";
 import { useWakeLock } from "@/lib/useWakeLock";
 import { useOrientationLock } from "@/lib/useOrientationLock";
@@ -207,20 +213,9 @@ export default function SidelinePage() {
   const currentPlay = play && game && play.game_id === game.id ? play : null;
   const displayLastUpdate = currentPlay ? lastUpdate : null;
 
-  // Fetched once a game is marked complete: total scrimmage-play yardage
-  // by mode. result_yards is null for Penalty/Turnover/Score rows already
-  // (never populated for those results), so a plain sum naturally excludes
-  // them without extra filtering. Sack yards are also summed separately
-  // (filtered to result_type = 'SACK') without changing the combined
-  // totals above — a sack's result_yards still counts toward them exactly
-  // as it always has.
-  const [summary, setSummary] = useState<{
-    gameId: string;
-    offenseYards: number;
-    defenseYards: number;
-    sackYardsLost: number;
-    sackYardsGained: number;
-  } | null>(null);
+  // Fetched once a game is marked complete: the full play log, reduced to
+  // Offense/Defense stat tables for the EoG summary.
+  const [summary, setSummary] = useState<{ gameId: string; stats: GameStats } | null>(null);
 
   useEffect(() => {
     if (!game || game.status !== "complete") return;
@@ -233,24 +228,12 @@ export default function SidelinePage() {
         .eq("game_id", game.id);
 
       if (cancelled || !data) return;
-      let offenseYards = 0;
-      let defenseYards = 0;
-      let sackYardsLost = 0;
-      let sackYardsGained = 0;
-      for (const row of data as {
-        mode: "OFFENSE" | "DEFENSE";
-        result_type: string | null;
-        result_yards: number | null;
-      }[]) {
-        if (row.result_yards === null) continue;
-        if (row.mode === "OFFENSE") offenseYards += row.result_yards;
-        else defenseYards += row.result_yards;
-
-        if (row.result_type !== "SACK") continue;
-        if (row.mode === "OFFENSE") sackYardsLost += row.result_yards;
-        else sackYardsGained += row.result_yards;
-      }
-      setSummary({ gameId: game.id, offenseYards, defenseYards, sackYardsLost, sackYardsGained });
+      setSummary({
+        gameId: game.id,
+        stats: computeGameStats(
+          data as { mode: "OFFENSE" | "DEFENSE"; result_type: Play["result_type"]; result_yards: number | null }[],
+        ),
+      });
     })();
 
     return () => {
@@ -258,8 +241,14 @@ export default function SidelinePage() {
     };
   }, [supabase, game]);
 
-  const currentSummary =
-    game && game.status === "complete" && summary?.gameId === game.id ? summary : null;
+  const currentStats =
+    game && game.status === "complete" && summary?.gameId === game.id ? summary.stats : null;
+
+  async function handleSaveFinalScore(us: number, opponent: number) {
+    if (!game) return;
+    await updateFinalScore(supabase, game.id, { us, opponent });
+    setGame({ ...game, final_score_us: us, final_score_opponent: opponent });
+  }
 
   useEffect(() => {
     const tick = () => {
@@ -277,8 +266,16 @@ export default function SidelinePage() {
     router.push("/login");
   }
 
+  const gameOver = game?.status === "complete";
+
   return (
-    <main className="flex h-dvh flex-col gap-3 overflow-hidden p-4">
+    <main
+      className={
+        gameOver
+          ? "flex min-h-dvh flex-col gap-3 p-4"
+          : "flex h-dvh flex-col gap-3 overflow-hidden p-4"
+      }
+    >
       <header className="flex items-center justify-between">
         <h1 className="text-lg font-bold text-slate-50">Sideline</h1>
         <SwitchRole current="sideline" />
@@ -294,23 +291,22 @@ export default function SidelinePage() {
         <p className="rounded-xl bg-red-950 px-4 py-3 text-sm text-red-300">{initError}</p>
       )}
 
-      {game?.status === "complete" && (
+      {gameOver && game && (
         <GameSummary
-          offenseYards={currentSummary?.offenseYards ?? null}
-          defenseYards={currentSummary?.defenseYards ?? null}
-          sackYardsLost={currentSummary?.sackYardsLost ?? null}
-          sackYardsGained={currentSummary?.sackYardsGained ?? null}
+          game={game}
+          stats={currentStats}
+          onSaveFinalScore={handleSaveFinalScore}
           onLogout={handleLogout}
         />
       )}
 
-      {game?.status !== "complete" && !currentPlay && !initError && (
+      {!gameOver && !currentPlay && !initError && (
         <p className="flex flex-1 items-center justify-center text-center text-slate-400">
           Waiting for the booth to start the game…
         </p>
       )}
 
-      {game?.status !== "complete" && currentPlay && (
+      {!gameOver && currentPlay && (
         <div className="flex min-h-0 flex-1 flex-col gap-3">
           <div className="grid min-h-[9dvh] flex-none grid-cols-3 items-center gap-2 rounded-2xl bg-slate-900 px-3 py-3 text-center">
             <div className="flex flex-col">
@@ -398,69 +394,256 @@ export default function SidelinePage() {
         </div>
       )}
 
-      {game?.status !== "complete" && (
+      {!gameOver && (
         <FreshnessBar freshness={freshness} elapsed={elapsed} connected={connected} />
       )}
     </main>
   );
 }
 
+// Reviewed by the coaching staff during a post-game huddle — a minute to
+// scan, not a glance-read. Unlike the live Sideline tiles, this is a
+// standard scrollable page: no compression, no glance-legibility
+// constraints, and no color-coding of stat VALUES (that's the coach's call
+// to make, not the app's). Color only marks which tile is which.
 function GameSummary({
-  offenseYards,
-  defenseYards,
-  sackYardsLost,
-  sackYardsGained,
+  game,
+  stats,
+  onSaveFinalScore,
   onLogout,
 }: {
-  offenseYards: number | null;
-  defenseYards: number | null;
-  sackYardsLost: number | null;
-  sackYardsGained: number | null;
+  game: Game;
+  stats: GameStats | null;
+  onSaveFinalScore: (us: number, opponent: number) => Promise<void>;
   onLogout: () => void;
 }) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-6 text-center">
-      <div className="flex flex-col items-center gap-1 rounded-2xl border-4 border-black bg-slate-900 px-8 py-5">
-        <span className="text-3xl font-black uppercase tracking-widest text-slate-50">Final</span>
-        <span className="text-sm font-bold uppercase tracking-widest text-slate-400">Game Ended</span>
-      </div>
-      <div className="grid w-full grid-cols-2 gap-4">
-        <div className="flex flex-col items-center gap-1 rounded-2xl border-4 border-black/15 bg-emerald-400 px-4 py-6 text-black">
-          <span className="text-sm font-bold uppercase tracking-widest opacity-80">
-            Offense Yards
-          </span>
-          <span className="text-4xl font-black">{offenseYards ?? "—"}</span>
-        </div>
-        <div className="flex flex-col items-center gap-1 rounded-2xl border-4 border-black/15 bg-slate-800 px-4 py-6 text-slate-100">
-          <span className="text-sm font-bold uppercase tracking-widest opacity-80">
-            Yards Allowed
-          </span>
-          <span className="text-4xl font-black">{defenseYards ?? "—"}</span>
-        </div>
-      </div>
-      <div className="grid w-full grid-cols-2 gap-4">
-        <div className="flex flex-col items-center gap-1 rounded-2xl border-4 border-black/15 bg-emerald-400 px-4 py-6 text-black">
-          <span className="text-sm font-bold uppercase tracking-widest opacity-80">
-            Sack Yards Lost
-          </span>
-          <span className="text-4xl font-black">{sackYardsLost ?? "—"}</span>
-        </div>
-        <div className="flex flex-col items-center gap-1 rounded-2xl border-4 border-black/15 bg-slate-800 px-4 py-6 text-slate-100">
-          <span className="text-sm font-bold uppercase tracking-widest opacity-80">
-            Sack Yards Gained
-          </span>
-          <span className="text-4xl font-black">{sackYardsGained ?? "—"}</span>
-        </div>
-      </div>
+    <div className="flex flex-1 flex-col items-center gap-6 pb-8 text-center">
+      <FinalScoreCard
+        scoreUs={game.final_score_us}
+        scoreOpponent={game.final_score_opponent}
+        opponent={game.opponent}
+        onSave={onSaveFinalScore}
+      />
+
+      <StatTile title="Offense" accent="offense">
+        <StatsTable
+          rushYards={stats?.offense.rushYards ?? null}
+          passYards={stats?.offense.passYards ?? null}
+          sackCount={stats?.offense.sackCount ?? null}
+          sackYards={stats?.offense.sackYards ?? null}
+          totalLabel="Total Offense"
+          total={stats?.offense.total ?? null}
+        />
+      </StatTile>
+
+      <StatTile title="Defense" accent="defense">
+        <StatsTable
+          rushYards={stats?.defense.rushYards ?? null}
+          passYards={stats?.defense.passYards ?? null}
+          sackCount={stats?.defense.sackCount ?? null}
+          sackYards={stats?.defense.sackYards ?? null}
+          totalLabel="Total Defense"
+          total={stats?.defense.total ?? null}
+        />
+      </StatTile>
 
       <button
         type="button"
         onClick={onLogout}
-        className="mt-6 rounded-xl border border-slate-600 px-6 py-3 text-sm font-semibold uppercase tracking-wide text-slate-300 active:bg-slate-800"
+        className="mt-2 rounded-xl border border-slate-600 px-6 py-3 text-sm font-semibold uppercase tracking-wide text-slate-300 active:bg-slate-800"
       >
         Log Out
       </button>
     </div>
+  );
+}
+
+function FinalScoreCard({
+  scoreUs,
+  scoreOpponent,
+  opponent,
+  onSave,
+}: {
+  scoreUs: number | null;
+  scoreOpponent: number | null;
+  opponent: string | null;
+  onSave: (us: number, opponent: number) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [us, setUs] = useState("");
+  const [opp, setOpp] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  function startEdit() {
+    setUs(scoreUs === null ? "" : String(scoreUs));
+    setOpp(scoreOpponent === null ? "" : String(scoreOpponent));
+    setEditing(true);
+  }
+
+  async function save() {
+    const usN = Number(us);
+    const oppN = Number(opp);
+    if (!Number.isInteger(usN) || usN < 0 || !Number.isInteger(oppN) || oppN < 0) return;
+    setSaving(true);
+    try {
+      await onSave(usN, oppN);
+      setEditing(false);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (editing) {
+    const valid = (v: string) => {
+      const n = Number(v);
+      return v.trim() !== "" && Number.isInteger(n) && n >= 0;
+    };
+    const canSave = valid(us) && valid(opp);
+    return (
+      <div className="flex w-full max-w-xs flex-col items-center gap-3 rounded-2xl border-4 border-black bg-slate-900 px-6 py-5">
+        <span className="text-sm font-bold uppercase tracking-widest text-slate-400">
+          Final Score
+        </span>
+        <div className="flex items-center gap-3">
+          <input
+            type="number"
+            inputMode="numeric"
+            value={us}
+            onChange={(e) => setUs(e.target.value)}
+            className="w-20 rounded-xl bg-slate-800 px-3 py-2 text-center text-3xl font-black text-slate-50"
+            aria-label="Our final score"
+          />
+          <span className="text-2xl font-black text-slate-600">–</span>
+          <input
+            type="number"
+            inputMode="numeric"
+            value={opp}
+            onChange={(e) => setOpp(e.target.value)}
+            className="w-20 rounded-xl bg-slate-800 px-3 py-2 text-center text-3xl font-black text-slate-50"
+            aria-label="Opponent final score"
+          />
+        </div>
+        <div className="flex gap-3">
+          <button
+            type="button"
+            disabled={!canSave || saving}
+            onClick={save}
+            className="rounded-xl bg-sky-600 px-5 py-2 text-sm font-bold text-white active:bg-sky-700 disabled:opacity-50"
+          >
+            Save
+          </button>
+          <button
+            type="button"
+            onClick={() => setEditing(false)}
+            className="rounded-xl bg-slate-800 px-5 py-2 text-sm font-semibold text-slate-300 active:bg-slate-700"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={startEdit}
+      className="flex w-full max-w-xs flex-col items-center gap-1 rounded-2xl border-4 border-black bg-slate-900 px-8 py-5 active:bg-slate-800"
+    >
+      <span className="text-sm font-bold uppercase tracking-widest text-slate-400">
+        Final{opponent ? ` vs ${opponent}` : ""}
+      </span>
+      <span className="text-5xl font-black text-slate-50">
+        {scoreUs ?? "—"}
+        <span className="mx-3 text-slate-600">–</span>
+        {scoreOpponent ?? "—"}
+      </span>
+      <span className="text-[11px] font-semibold uppercase tracking-widest text-slate-500">
+        Tap to edit
+      </span>
+    </button>
+  );
+}
+
+const STAT_TILE_ACCENT = {
+  offense: {
+    border: "border-sky-700",
+    bg: "bg-sky-950/40",
+    heading: "text-sky-300",
+  },
+  // Deliberately not the emerald used for "clean"/positive state on the
+  // live Sideline view — this is a structural cue, not a value judgment,
+  // so it needs its own color. Red is off the table entirely: it already
+  // means "urgent" everywhere else in the app.
+  defense: {
+    border: "border-teal-700",
+    bg: "bg-teal-950/40",
+    heading: "text-teal-300",
+  },
+} as const;
+
+function StatTile({
+  title,
+  accent,
+  children,
+}: {
+  title: string;
+  accent: keyof typeof STAT_TILE_ACCENT;
+  children: React.ReactNode;
+}) {
+  const { border, bg, heading } = STAT_TILE_ACCENT[accent];
+  return (
+    <div className={`w-full max-w-md rounded-2xl border-2 ${border} ${bg} p-5 text-left`}>
+      <h2 className={`mb-3 text-center text-sm font-bold uppercase tracking-widest ${heading}`}>
+        {title}
+      </h2>
+      <div className="flex flex-col gap-4">{children}</div>
+    </div>
+  );
+}
+
+function StatsTable({
+  rushYards,
+  passYards,
+  sackCount,
+  sackYards,
+  totalLabel,
+  total,
+}: {
+  rushYards: number | null;
+  passYards: number | null;
+  sackCount: number | null;
+  sackYards: number | null;
+  totalLabel: string;
+  total: number | null;
+}) {
+  const fmt = (v: number | null) => (v === null ? "—" : v);
+  return (
+    <table className="w-full text-sm">
+      <tbody className="divide-y divide-slate-800">
+        <tr>
+          <td className="py-2 text-slate-300">Rush</td>
+          <td className="py-2 text-right font-bold text-slate-50">{fmt(rushYards)}</td>
+        </tr>
+        <tr>
+          <td className="py-2 text-slate-300">Pass</td>
+          <td className="py-2 text-right font-bold text-slate-50">{fmt(passYards)}</td>
+        </tr>
+        <tr>
+          <td className="py-2 text-slate-300">Sacks</td>
+          <td className="py-2 text-right font-bold text-slate-50">{fmt(sackCount)}</td>
+        </tr>
+        <tr>
+          <td className="py-2 text-slate-300">Sack Yards</td>
+          <td className="py-2 text-right font-bold text-slate-50">{fmt(sackYards)}</td>
+        </tr>
+        <tr className="border-t-2 border-slate-700">
+          <td className="pt-3 font-bold text-slate-100">{totalLabel}</td>
+          <td className="pt-3 text-right text-xl font-black text-slate-50">{fmt(total)}</td>
+        </tr>
+      </tbody>
+    </table>
   );
 }
 
