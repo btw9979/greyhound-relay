@@ -379,13 +379,13 @@ export interface PlayLogRow {
  * on 3rd down" has to be read off the *previous* row, tracked here as
  * `enteringDown`.
  *
- * SCORE rows fold into Rush/Pass yardage and their own TD counters
- * (score_play_type says which) but — like every other attempt/count stat
- * here — are excluded from Attempts, Total Plays, First Downs, and 3rd
- * Down Conversions, which only look at RUN/PASS_COMPLETE/PASS_INCOMPLETE/
- * SACK rows (plus PENALTY for First Downs). A legacy SCORE row predating
- * this field has score_play_type null and contributes no yardage/TD
- * count, same as before that distinction was tracked.
+ * A touchdown IS a real Run or Pass Complete play — score_play_type says
+ * which — so besides its own TD tally, a SCORE row counts everywhere that
+ * play type naturally would: Rushing Attempts or Completions, yardage,
+ * Total Plays, First Downs (a score always gains one), and a 3rd Down
+ * Conversion if it happened on 3rd down. A legacy SCORE row from before
+ * score_play_type existed has it null and is excluded entirely, same as
+ * before that distinction was tracked.
  */
 export function computeGameStats(plays: PlayLogRow[]): GameStats {
   const offense = emptySideStats();
@@ -409,42 +409,48 @@ export function computeGameStats(plays: PlayLogRow[]): GameStats {
       side.passing.sackYards += row.result_yards;
     }
 
-    if (row.result_type === "SCORE") {
-      if (row.result_yards !== null) {
-        if (row.score_play_type === "RUN") side.rushing.yards += row.result_yards;
-        else if (row.score_play_type === "PASS_COMPLETE") side.passing.yards += row.result_yards;
-      }
-      if (row.score_play_type === "RUN") side.rushing.touchdowns += 1;
-      else if (row.score_play_type === "PASS_COMPLETE") side.passing.touchdowns += 1;
-      continue;
+    const isScore = row.result_type === "SCORE";
+    if (isScore && row.score_play_type === null) continue;
+
+    const effectiveType = isScore ? row.score_play_type : row.result_type;
+
+    if (isScore) {
+      if (effectiveType === "RUN") side.rushing.touchdowns += 1;
+      else side.passing.touchdowns += 1;
     }
 
-    if (row.result_type === "RUN" && row.result_yards !== null) {
+    if (effectiveType === "RUN" && row.result_yards !== null) {
       side.rushing.yards += row.result_yards;
       side.rushing.attempts += 1;
     }
-    if (row.result_type === "PASS_COMPLETE" && row.result_yards !== null) {
+    if (effectiveType === "PASS_COMPLETE" && row.result_yards !== null) {
       side.passing.yards += row.result_yards;
       side.passing.completions += 1;
     }
-    if (row.result_type === "PASS_COMPLETE" || row.result_type === "PASS_INCOMPLETE") {
+    if (effectiveType === "PASS_COMPLETE" || effectiveType === "PASS_INCOMPLETE") {
       side.passing.attempts += 1;
     }
 
     if (
-      row.result_type === "RUN" ||
-      row.result_type === "PASS_COMPLETE" ||
-      row.result_type === "PASS_INCOMPLETE" ||
-      row.result_type === "SACK"
+      effectiveType === "RUN" ||
+      effectiveType === "PASS_COMPLETE" ||
+      effectiveType === "PASS_INCOMPLETE" ||
+      effectiveType === "SACK"
     ) {
       side.total.plays += 1;
       if (attemptedOn !== null && downAsNumber(attemptedOn) === 3) {
         side.total.thirdDownAttempts += 1;
-        if (downAsNumber(row.down) === 1) side.total.thirdDownConversions += 1;
+        // A score always converts; a score row's own `down` field isn't a
+        // "next play" state (there is no next play in that drive), so a
+        // real, non-score conversion instead needs the resulting down to
+        // actually be 1.
+        if (isScore || downAsNumber(row.down) === 1) side.total.thirdDownConversions += 1;
       }
     }
 
-    if (
+    if (isScore) {
+      side.total.firstDowns += 1;
+    } else if (
       (row.result_type === "RUN" ||
         row.result_type === "PASS_COMPLETE" ||
         row.result_type === "PASS_INCOMPLETE" ||
