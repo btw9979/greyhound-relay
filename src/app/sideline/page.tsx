@@ -49,62 +49,56 @@ const TILE_TONE = {
     icon: "‼",
     box: "animate-pulse border-[6px] border-black bg-red-600 text-white",
   },
+  // Purely informational, no good/bad state — 3-Tech and Flat read by text,
+  // not color, so this never changes regardless of value.
+  neutral: {
+    icon: "•",
+    box: "border-4 border-black/15 bg-slate-900 text-slate-100",
+  },
+  // Splits' own softer "notice" convention (amber, not red) — distinct from
+  // Personnel's clean/alert/urgent severity ladder.
+  correct: {
+    icon: "✓",
+    box: "border-4 border-black/15 bg-slate-900 text-slate-100",
+  },
+  flagged: {
+    icon: "⚠",
+    box: "border-4 border-black bg-amber-400 text-black",
+  },
 } as const;
 
-// The two highest-priority fields for the current mode (3-Tech/Flat on
-// offense, Personnel/Formation on defense) — sized by flex-grow rather than
-// a fixed dvh so they automatically take whatever vertical space is
-// actually available for however many fields are active, instead of
-// assuming a fixed tile count. min-h-0 overrides flexbox's default
-// min-height: auto, which would otherwise refuse to let this shrink below
-// its content size and defeat the fit-one-screen guarantee.
+// flex-[3] only matters in Defense mode's flex-column stack (2 large tiles);
+// it's inert when a Tile is placed in Offense mode's 2x2 grid instead, where
+// the grid's own equal 1fr tracks size the cell. min-h-0 overrides
+// flexbox/grid's default auto min-size, which would otherwise refuse to let
+// this shrink below its content and defeat the fit-one-screen guarantee.
+// `compact` is used for the four equal Offense tiles, which are half the
+// width of Defense's full-width tiles and need smaller value text to avoid
+// wrapping/overflowing (e.g. Splits' "Flanker tight").
 function Tile({
   label,
   text,
   tone,
+  compact = false,
 }: {
   label: string;
   text: string;
   tone: keyof typeof TILE_TONE;
+  compact?: boolean;
 }) {
   const { icon, box } = TILE_TONE[tone];
   return (
     <div
-      className={`flex min-h-0 flex-[3] flex-col items-center justify-center rounded-3xl px-4 py-3 text-center transition-colors ${box}`}
+      className={`flex min-h-0 flex-[3] flex-col items-center justify-center rounded-3xl px-3 py-3 text-center transition-colors ${box}`}
     >
       <span className="text-sm font-bold uppercase tracking-widest opacity-80">{label}</span>
-      <span className="mt-1 flex items-center gap-2 text-4xl font-black leading-tight sm:text-5xl">
-        <span aria-hidden="true">{icon}</span>
-        {text}
-      </span>
-    </div>
-  );
-}
-
-// Lower-priority fields for the current mode (Personnel/Splits on offense) —
-// paired side-by-side in one shared row rather than each claiming a
-// full-width block, so they stay legible without competing with the
-// higher-priority fields above for space.
-function CompactTile({
-  label,
-  text,
-  icon,
-  flagged,
-}: {
-  label: string;
-  text: string;
-  icon: string;
-  flagged: boolean;
-}) {
-  return (
-    <div
-      className={[
-        "flex min-h-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-2xl border-4 px-3 py-2 text-center transition-colors",
-        flagged ? "border-black bg-amber-400 text-black" : "border-black/15 bg-slate-900 text-slate-100",
-      ].join(" ")}
-    >
-      <span className="text-[11px] font-bold uppercase tracking-widest opacity-80">{label}</span>
-      <span className="flex items-center gap-2 text-lg font-black sm:text-xl">
+      <span
+        className={
+          compact
+            ? "mt-1 flex items-center gap-1.5 text-xl font-black leading-tight sm:text-2xl"
+            : "mt-1 flex items-center gap-2 text-4xl font-black leading-tight sm:text-5xl"
+        }
+      >
         <span aria-hidden="true">{icon}</span>
         {text}
       </span>
@@ -348,45 +342,46 @@ export default function SidelinePage() {
           </div>
 
           {/* Fills whatever vertical space remains after the top bar and
-              freshness bar. Offense priority: 3-Tech (the most actionable
-              read — tells staff whether an edge attack is live) and Flat
-              get the two large tiles; Personnel/Splits are lower priority
-              and paired into the small shared row. Defense is unchanged:
-              Personnel/Formation both stay large, no third row. */}
+              freshness bar. Offense: all four fields are equal-priority
+              informational reads, laid out as a 2x2 grid (3-Tech/Flat on
+              top, Personnel/Splits below) — grid-rows-2's minmax(0,1fr)
+              tracks are the grid equivalent of min-h-0, letting rows shrink
+              to fit rather than overflow. Defense is unchanged: Personnel/
+              Formation stay in the original two-large-tile flex stack. */}
           <div className="flex min-h-0 flex-1 flex-col gap-3">
             {currentPlay.mode === "OFFENSE" ? (
-              <>
+              <div className="grid min-h-0 flex-1 grid-cols-2 grid-rows-2 gap-3">
                 <Tile
                   label="3-Tech"
                   text={THREE_TECH_LABELS[currentPlay.three_tech ?? "FIELD"]}
-                  tone={currentPlay.three_tech === "FIELD" || currentPlay.three_tech === null ? "clean" : "alert"}
+                  tone="neutral"
+                  compact
                 />
                 <Tile
                   label="Flat"
                   text={FLAT_LABELS[currentPlay.flat ?? "SET"]}
-                  tone={currentPlay.flat === "DEFENDER" ? "alert" : "clean"}
+                  tone="neutral"
+                  compact
                 />
-                <div className="flex min-h-0 flex-[2] gap-3">
-                  <CompactTile
-                    label="Personnel"
-                    text={
-                      currentPlay.personnel === "CLEAN"
-                        ? "11 ON FIELD"
-                        : currentPlay.personnel === "SHORT"
-                          ? "SHORT"
-                          : "OVER"
-                    }
-                    icon={currentPlay.personnel === "CLEAN" ? "✓" : "⚠"}
-                    flagged={currentPlay.personnel !== "CLEAN"}
-                  />
-                  <CompactTile
-                    label="Splits"
-                    text={SPLITS_LABELS[currentPlay.splits ?? "NONE"]}
-                    icon={currentPlay.splits && currentPlay.splits !== "NONE" ? "⚠" : "✓"}
-                    flagged={!!(currentPlay.splits && currentPlay.splits !== "NONE")}
-                  />
-                </div>
-              </>
+                <Tile
+                  label="Personnel"
+                  text={
+                    currentPlay.personnel === "CLEAN"
+                      ? "11 ON FIELD"
+                      : currentPlay.personnel === "SHORT"
+                        ? "SHORT"
+                        : "OVER"
+                  }
+                  tone={currentPlay.personnel === "CLEAN" ? "clean" : currentPlay.personnel === "SHORT" ? "alert" : "urgent"}
+                  compact
+                />
+                <Tile
+                  label="Splits"
+                  text={SPLITS_LABELS[currentPlay.splits ?? "NONE"]}
+                  tone={currentPlay.splits && currentPlay.splits !== "NONE" ? "flagged" : "correct"}
+                  compact
+                />
+              </div>
             ) : (
               <>
                 <Tile
