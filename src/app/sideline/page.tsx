@@ -620,7 +620,7 @@ type StatRow = readonly [label: string, value: string];
 function offenseRushingRows(r: RushingStats | undefined): StatRow[] {
   return [
     ["Rushing Attempts", fmtInt(r?.attempts)],
-    ["Rush", fmtInt(r?.yards)],
+    ["Total Rushing Yds", fmtInt(r?.yards)],
     ["Yards Per Carry", fmtRate(r?.yardsPerCarry)],
     ["Rushing TDs", fmtInt(r?.touchdowns)],
   ];
@@ -650,7 +650,7 @@ function offenseTotalRows(t: TotalStats | undefined): StatRow[] {
 function defenseRushingRows(r: RushingStats | undefined): StatRow[] {
   return [
     ["Rushing Attempts Allowed", fmtInt(r?.attempts)],
-    ["Rush Allowed", fmtInt(r?.yards)],
+    ["Rushing Yds Allowed", fmtInt(r?.yards)],
     ["Yards Per Carry Allowed", fmtRate(r?.yardsPerCarry)],
     ["Rushing TDs Allowed", fmtInt(r?.touchdowns)],
   ];
