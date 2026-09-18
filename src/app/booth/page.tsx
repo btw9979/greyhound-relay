@@ -10,6 +10,7 @@ import {
   formatDownDistance,
   formatFieldPosition,
   getCurrentGame,
+  normalizePlayFromDb,
   startNewGame,
   DEFAULT_DISTANCE,
   DEFAULT_DOWN,
@@ -245,7 +246,7 @@ export default function BoothPage() {
           // to OFFENSE, so a reload before the first drive still shows it.
           if (currentGame.starting_mode) setPendingMode(currentGame.starting_mode);
         } else {
-          const p = latest as Play;
+          const p = normalizePlayFromDb(latest as Play);
           setPendingMode(p.mode);
           setState({
             driveNumber: p.drive_number,

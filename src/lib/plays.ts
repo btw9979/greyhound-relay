@@ -77,6 +77,24 @@ export interface Play {
   created_by: string | null;
 }
 
+/**
+ * `down` is a Postgres `text` column (it has to hold "P" alongside the
+ * numbered downs — see migration 0005), so a row freshly read back from
+ * Supabase has it as a JSON string ("2"), not the number the rest of the
+ * app treats it as. Within one continuous session that's never an issue —
+ * `state.down` only ever gets its value from this app's own numeric
+ * literals — but Booth's initial-load effect fetches the latest play row
+ * straight from Supabase on every mount, including a mid-drive reload, and
+ * assigns `p.down` directly into that same state. Left unnormalized, a
+ * later `currentDown + 1` in applyRunOrPassResult would silently
+ * string-concatenate ("2" + 1 = "21") instead of incrementing, producing a
+ * down value the DB's check constraint would then reject. Every place a
+ * Play row crosses the Supabase boundary should run it through this first.
+ */
+export function normalizePlayFromDb(row: Play): Play {
+  return { ...row, down: row.down === "P" ? "P" : (Number(row.down) as 1 | 2 | 3 | 4) };
+}
+
 export const DEFAULT_DOWN = 1;
 export const DEFAULT_DISTANCE = 10;
 export const DEFAULT_PERSONNEL: Personnel = "CLEAN";

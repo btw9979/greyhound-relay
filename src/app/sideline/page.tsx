@@ -8,6 +8,7 @@ import {
   formatDownDistance,
   formatFieldPosition,
   computeGameStats,
+  normalizePlayFromDb,
   updateFinalScore,
 } from "@/lib/plays";
 import type {
@@ -190,7 +191,7 @@ export default function SidelinePage() {
         .maybeSingle();
 
       if (!cancelled && latest) {
-        setPlay(latest as Play);
+        setPlay(normalizePlayFromDb(latest as Play));
         setLastUpdate(Date.parse(latest.created_at));
       }
     })();
@@ -201,7 +202,7 @@ export default function SidelinePage() {
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "plays", filter: `game_id=eq.${game.id}` },
         (payload) => {
-          const row = payload.new as Play;
+          const row = normalizePlayFromDb(payload.new as Play);
           setPlay(row);
           setLastUpdate(Date.parse(row.created_at));
         },
