@@ -224,14 +224,19 @@ export default function SidelinePage() {
     (async () => {
       const { data } = await supabase
         .from("plays")
-        .select("mode, result_type, result_yards")
+        .select("mode, result_type, result_yards, score_play_type")
         .eq("game_id", game.id);
 
       if (cancelled || !data) return;
       setSummary({
         gameId: game.id,
         stats: computeGameStats(
-          data as { mode: "OFFENSE" | "DEFENSE"; result_type: Play["result_type"]; result_yards: number | null }[],
+          data as {
+            mode: "OFFENSE" | "DEFENSE";
+            result_type: Play["result_type"];
+            result_yards: number | null;
+            score_play_type: Play["score_play_type"];
+          }[],
         ),
       });
     })();

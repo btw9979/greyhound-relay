@@ -31,6 +31,7 @@ import type {
   Personnel,
   Play,
   ResultType,
+  ScorePlayType,
   Splits,
   ThreeTech,
 } from "@/lib/plays";
@@ -277,7 +278,7 @@ export default function BoothPage() {
   const insert = useCallback(
     async (
       next: GameState,
-      result: { type: ResultType; yards: number | null } | null,
+      result: { type: ResultType; yards: number | null; scorePlayType?: ScorePlayType } | null,
     ) => {
       if (!game || !userId) return false;
       setStatus("sending");
@@ -297,6 +298,7 @@ export default function BoothPage() {
         three_tech: next.mode === "OFFENSE" ? next.threeTech : null,
         result_type: result?.type ?? null,
         result_yards: result?.yards ?? null,
+        score_play_type: result?.scorePlayType ?? null,
       });
       setStatus(error ? "error" : "sent");
       if (!error) {
@@ -514,6 +516,7 @@ export default function BoothPage() {
     type: ResultType,
     yards: number | null,
     overrides?: Partial<GameState>,
+    scorePlayType?: ScorePlayType,
   ): Promise<boolean> {
     if (!state) return false;
     const next: GameState = {
@@ -526,7 +529,7 @@ export default function BoothPage() {
       hash: DEFAULT_HASH,
       threeTech: DEFAULT_THREE_TECH,
     };
-    const ok = await insert(next, { type, yards });
+    const ok = await insert(next, { type, yards, scorePlayType });
     if (!ok) return false;
     setState(next);
     setSheet(null);
@@ -591,14 +594,14 @@ export default function BoothPage() {
     });
   }
 
-  function submitScore() {
+  function submitScore(scorePlayType: ScorePlayType) {
     if (!state) return;
     // A score is a real scrimmage play covering a real distance — from the
     // current spot to the goal line — not just a drive-ending event with
     // no yardage, unlike Turnover/Penalty. Computed the same way P & Goal
     // is: the current offense's attacking-frame distance to the goal.
     const yards = attackingFieldPosition(state.mode, state.fieldPosition);
-    submitResult("SCORE", yards);
+    submitResult("SCORE", yards, undefined, scorePlayType);
   }
 
   function submitPenalty() {
@@ -946,10 +949,31 @@ export default function BoothPage() {
             </button>
             <button
               type="button"
-              onClick={submitScore}
+              onClick={() => setPendingResult("SCORE")}
               className="rounded-xl bg-emerald-600 px-4 py-4 text-base font-semibold text-white active:bg-emerald-700"
             >
               {RESULT_LABELS.SCORE}
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "result" && pendingResult === "SCORE" && (
+        <Sheet title="TD — Run or Pass?" onClose={() => setPendingResult(null)}>
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => submitScore("RUN")}
+              className="rounded-xl bg-emerald-600 px-4 py-6 text-lg font-bold text-white active:bg-emerald-700"
+            >
+              Run
+            </button>
+            <button
+              type="button"
+              onClick={() => submitScore("PASS_COMPLETE")}
+              className="rounded-xl bg-emerald-600 px-4 py-6 text-lg font-bold text-white active:bg-emerald-700"
+            >
+              Pass
             </button>
           </div>
         </Sheet>

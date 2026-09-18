@@ -36,6 +36,8 @@ export type ResultType =
   | "PENALTY"
   | "TURNOVER"
   | "SCORE";
+/** Which kind of play a touchdown was — see Play.score_play_type. */
+export type ScorePlayType = "RUN" | "PASS_COMPLETE";
 
 /** Shared state common to both modes, plus exactly one mode's fields. */
 export type OffenseState = {
@@ -67,6 +69,10 @@ export interface Play {
   three_tech: ThreeTech | null;
   result_type: ResultType | null;
   result_yards: number | null;
+  // Only set when result_type is 'SCORE' — which underlying play type the
+  // touchdown actually was, for the EoG Rush/Pass breakdown. Null for every
+  // other result_type.
+  score_play_type: ScorePlayType | null;
   created_at: string;
   created_by: string | null;
 }
@@ -304,12 +310,21 @@ function emptySideStats(): SideStats {
 
 /**
  * Builds the EoG summary's Offense/Defense stat tables from the game's full
- * play log. Only RUN, PASS_COMPLETE, and SACK rows contribute — the other
+ * play log. RUN, PASS_COMPLETE, SACK, and SCORE rows contribute — the other
  * result types (and presnap-only rows, where result_type is null) carry no
- * yardage relevant to Total Offense/Defense.
+ * yardage relevant to Total Offense/Defense. A SCORE row is itself a real
+ * run or pass (score_play_type says which) and folds into that same
+ * Rush/Pass bucket rather than being counted separately — a legacy SCORE
+ * row from before this field existed has score_play_type null and is
+ * excluded, same as it was before this distinction was tracked.
  */
 export function computeGameStats(
-  plays: { mode: Mode; result_type: ResultType | null; result_yards: number | null }[],
+  plays: {
+    mode: Mode;
+    result_type: ResultType | null;
+    result_yards: number | null;
+    score_play_type: ScorePlayType | null;
+  }[],
 ): GameStats {
   const offense = emptySideStats();
   const defense = emptySideStats();
@@ -317,8 +332,9 @@ export function computeGameStats(
   for (const row of plays) {
     if (row.result_yards === null) continue;
     const side = row.mode === "OFFENSE" ? offense : defense;
-    if (row.result_type === "RUN") side.rushYards += row.result_yards;
-    else if (row.result_type === "PASS_COMPLETE") side.passYards += row.result_yards;
+    const asRunOrPass = row.result_type === "SCORE" ? row.score_play_type : row.result_type;
+    if (asRunOrPass === "RUN") side.rushYards += row.result_yards;
+    else if (asRunOrPass === "PASS_COMPLETE") side.passYards += row.result_yards;
     else if (row.result_type === "SACK") {
       side.sackCount += 1;
       side.sackYards += row.result_yards;
