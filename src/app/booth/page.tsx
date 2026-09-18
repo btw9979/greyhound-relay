@@ -15,8 +15,10 @@ import {
   DEFAULT_DOWN,
   DEFAULT_FLAT,
   DEFAULT_FORMATION,
+  DEFAULT_HASH,
   DEFAULT_PERSONNEL,
   DEFAULT_SPLITS,
+  DEFAULT_THREE_TECH,
 } from "@/lib/plays";
 import type {
   Down,
@@ -24,11 +26,13 @@ import type {
   Formation,
   Game,
   GameType,
+  Hash,
   Mode,
   Personnel,
   Play,
   ResultType,
   Splits,
+  ThreeTech,
 } from "@/lib/plays";
 import { SwitchRole } from "@/components/SwitchRole";
 import { Sheet } from "@/components/Sheet";
@@ -46,6 +50,8 @@ interface GameState {
   flat: Flat;
   splits: Splits;
   formation: Formation;
+  hash: Hash;
+  threeTech: ThreeTech;
 }
 
 function ToggleRow<T extends string>({
@@ -81,6 +87,54 @@ function ToggleRow<T extends string>({
                   ? opt.clean
                     ? "bg-emerald-500 text-emerald-950 ring-4 ring-emerald-300"
                     : "bg-red-500 text-red-950 ring-4 ring-red-300"
+                  : "bg-slate-800 text-slate-300 active:bg-slate-700",
+              ].join(" ")}
+            >
+              {opt.text}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Neutral 3-way selector for presnap reads with no "normal" value (Hash,
+ * 3-Tech) — every option is equally valid, so unlike ToggleRow there's no
+ * clean/alert coloring, just a single active highlight.
+ */
+function SelectRow<T extends string>({
+  label,
+  value,
+  options,
+  onSelect,
+  disabled,
+}: {
+  label: string;
+  value: T;
+  options: { value: T; text: string }[];
+  onSelect: (v: T) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div>
+      <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-slate-400">
+        {label}
+      </p>
+      <div className="grid grid-cols-3 gap-3">
+        {options.map((opt) => {
+          const active = opt.value === value;
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              disabled={disabled}
+              onClick={() => onSelect(opt.value)}
+              className={[
+                "rounded-2xl px-2 py-6 text-lg font-bold transition-colors disabled:opacity-50",
+                active
+                  ? "bg-slate-100 text-slate-900"
                   : "bg-slate-800 text-slate-300 active:bg-slate-700",
               ].join(" ")}
             >
@@ -199,6 +253,8 @@ export default function BoothPage() {
             flat: p.flat ?? DEFAULT_FLAT,
             splits: p.splits ?? DEFAULT_SPLITS,
             formation: p.formation ?? DEFAULT_FORMATION,
+            hash: p.hash ?? DEFAULT_HASH,
+            threeTech: p.three_tech ?? DEFAULT_THREE_TECH,
           });
         }
       } catch {
@@ -234,6 +290,8 @@ export default function BoothPage() {
         flat: next.mode === "OFFENSE" ? next.flat : null,
         splits: next.mode === "OFFENSE" ? next.splits : null,
         formation: next.mode === "DEFENSE" ? next.formation : null,
+        hash: next.mode === "OFFENSE" ? next.hash : null,
+        three_tech: next.mode === "OFFENSE" ? next.threeTech : null,
         result_type: result?.type ?? null,
         result_yards: result?.yards ?? null,
       });
@@ -403,6 +461,8 @@ export default function BoothPage() {
       flat: DEFAULT_FLAT,
       splits: DEFAULT_SPLITS,
       formation: DEFAULT_FORMATION,
+      hash: DEFAULT_HASH,
+      threeTech: DEFAULT_THREE_TECH,
     };
     const ok = await insert(next, null);
     if (ok) {
@@ -451,6 +511,8 @@ export default function BoothPage() {
       flat: DEFAULT_FLAT,
       splits: DEFAULT_SPLITS,
       formation: DEFAULT_FORMATION,
+      hash: DEFAULT_HASH,
+      threeTech: DEFAULT_THREE_TECH,
     };
     const ok = await insert(next, { type, yards });
     if (!ok) return false;
@@ -684,6 +746,28 @@ export default function BoothPage() {
               { value: "FLANKER_TIGHT", text: "FLANKER TIGHT", severity: "alert" },
               { value: "SLOT_TIGHT", text: "SLOT TIGHT", severity: "alert" },
               { value: "BOTH_TIGHT", text: "BOTH TIGHT", severity: "alert" },
+            ]}
+          />
+          <SelectRow
+            label="Hash"
+            value={state.hash}
+            disabled={disabled}
+            onSelect={(v) => updateAndSend({ hash: v })}
+            options={[
+              { value: "L", text: "L" },
+              { value: "M", text: "M" },
+              { value: "R", text: "R" },
+            ]}
+          />
+          <SelectRow
+            label="3-Tech"
+            value={state.threeTech}
+            disabled={disabled}
+            onSelect={(v) => updateAndSend({ threeTech: v })}
+            options={[
+              { value: "FIELD", text: "Field" },
+              { value: "BOUNDARY", text: "Boundary" },
+              { value: "HEADS_UP", text: "Heads-Up" },
             ]}
           />
         </>

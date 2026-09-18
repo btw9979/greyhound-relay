@@ -23,6 +23,8 @@ export type Personnel = "CLEAN" | "SHORT" | "OVER";
 export type Flat = "SET" | "DEFENDER";
 export type Splits = "NONE" | "FLANKER_TIGHT" | "SLOT_TIGHT" | "BOTH_TIGHT";
 export type Formation = "OPEN" | "CLOSED";
+export type Hash = "L" | "M" | "R";
+export type ThreeTech = "FIELD" | "BOUNDARY" | "HEADS_UP";
 export type ResultType =
   | "RUN"
   | "PASS_COMPLETE"
@@ -58,6 +60,8 @@ export interface Play {
   flat: Flat | null;
   splits: Splits | null;
   formation: Formation | null;
+  hash: Hash | null;
+  three_tech: ThreeTech | null;
   result_type: ResultType | null;
   result_yards: number | null;
   created_at: string;
@@ -70,6 +74,11 @@ export const DEFAULT_PERSONNEL: Personnel = "CLEAN";
 export const DEFAULT_FLAT: Flat = "SET";
 export const DEFAULT_SPLITS: Splits = "NONE";
 export const DEFAULT_FORMATION: Formation = "OPEN";
+// Hash and 3-Tech have no "normal" value the way Flat/Splits/Formation do —
+// every snap needs a real, deliberately-tapped read for both. These are
+// only the initial selection shown before the booth taps anything.
+export const DEFAULT_HASH: Hash = "M";
+export const DEFAULT_THREE_TECH: ThreeTech = "HEADS_UP";
 
 /** Human-readable "Own 25" / "Opp 40" for a 1-99 yards-to-goal value. */
 export function formatFieldPosition(fieldPosition: number): string {

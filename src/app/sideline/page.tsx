@@ -17,6 +17,11 @@ const SPLITS_LABELS = {
   SLOT_TIGHT: "Slot tight",
   BOTH_TIGHT: "Both tight",
 } as const;
+const THREE_TECH_LABELS = {
+  FIELD: "Field",
+  BOUNDARY: "Boundary",
+  HEADS_UP: "Heads-Up",
+} as const;
 
 type Freshness = "fresh" | "stale" | "dead" | "none";
 
@@ -43,6 +48,12 @@ const TILE_TONE = {
   urgent: {
     icon: "‼",
     box: "animate-pulse border-[6px] border-black bg-red-600 text-white",
+  },
+  // Purely informational — every value is equally valid, so no clean/alert
+  // coloring, just a plain neutral box.
+  neutral: {
+    icon: "•",
+    box: "border-4 border-black/15 bg-slate-900 text-slate-100",
   },
 } as const;
 
@@ -328,6 +339,14 @@ export default function SidelinePage() {
                 label="Formation"
                 text={FORMATION_LABELS[currentPlay.formation ?? "OPEN"]}
                 tone={currentPlay.formation === "CLOSED" ? "alert" : "clean"}
+              />
+            )}
+
+            {currentPlay.mode === "OFFENSE" && (
+              <Tile
+                label="3-Tech"
+                text={THREE_TECH_LABELS[currentPlay.three_tech ?? "HEADS_UP"]}
+                tone="neutral"
               />
             )}
           </div>
