@@ -72,33 +72,29 @@ const TILE_TONE = {
 // the grid's own equal 1fr tracks size the cell. min-h-0 overrides
 // flexbox/grid's default auto min-size, which would otherwise refuse to let
 // this shrink below its content and defeat the fit-one-screen guarantee.
-// `compact` is used for the four equal Offense tiles, which are half the
-// width of Defense's full-width tiles and need smaller value text to avoid
-// wrapping/overflowing (e.g. Splits' "Flanker tight").
+//
+// The value text is sized with a container query (container-type: size on
+// this div, font-size in cqw on the value span) rather than a fixed size per
+// call site: it scales to whatever box the tile actually ends up with — big
+// on Defense's full-width tiles, smaller on Offense's four-way grid — so it
+// always fills the available space instead of leaving fixed dead margin,
+// and self-corrects if the tile count/arrangement changes again later.
 function Tile({
   label,
   text,
   tone,
-  compact = false,
 }: {
   label: string;
   text: string;
   tone: keyof typeof TILE_TONE;
-  compact?: boolean;
 }) {
   const { icon, box } = TILE_TONE[tone];
   return (
     <div
-      className={`flex min-h-0 flex-[3] flex-col items-center justify-center rounded-3xl px-3 py-3 text-center transition-colors ${box}`}
+      className={`flex min-h-0 flex-[3] flex-col items-center justify-center rounded-3xl px-3 py-3 text-center transition-colors [container-type:size] ${box}`}
     >
       <span className="text-sm font-bold uppercase tracking-widest opacity-80">{label}</span>
-      <span
-        className={
-          compact
-            ? "mt-1 flex items-center gap-1.5 text-xl font-black leading-tight sm:text-2xl"
-            : "mt-1 flex items-center gap-2 text-4xl font-black leading-tight sm:text-5xl"
-        }
-      >
+      <span className="mt-1 flex items-center gap-2 text-[clamp(1.25rem,16cqw,3rem)] font-black leading-tight">
         <span aria-hidden="true">{icon}</span>
         {text}
       </span>
@@ -355,13 +351,11 @@ export default function SidelinePage() {
                   label="3-Tech"
                   text={THREE_TECH_LABELS[currentPlay.three_tech ?? "FIELD"]}
                   tone="neutral"
-                  compact
                 />
                 <Tile
                   label="Flat"
                   text={FLAT_LABELS[currentPlay.flat ?? "SET"]}
                   tone="neutral"
-                  compact
                 />
                 <Tile
                   label="Personnel"
@@ -373,13 +367,11 @@ export default function SidelinePage() {
                         : "OVER"
                   }
                   tone={currentPlay.personnel === "CLEAN" ? "clean" : currentPlay.personnel === "SHORT" ? "alert" : "urgent"}
-                  compact
                 />
                 <Tile
                   label="Splits"
                   text={SPLITS_LABELS[currentPlay.splits ?? "NONE"]}
                   tone={currentPlay.splits && currentPlay.splits !== "NONE" ? "flagged" : "correct"}
-                  compact
                 />
               </div>
             ) : (
