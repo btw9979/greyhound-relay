@@ -57,6 +57,12 @@ const TILE_TONE = {
   },
 } as const;
 
+// The two most urgent/actionable fields (Personnel, Flat/Formation) — sized
+// by flex-grow rather than a fixed dvh so they automatically take whatever
+// vertical space is actually available for however many fields are active,
+// instead of assuming a fixed tile count. min-h-0 overrides flexbox's
+// default min-height: auto, which would otherwise refuse to let this shrink
+// below its content size and defeat the fit-one-screen guarantee.
 function Tile({
   label,
   text,
@@ -69,10 +75,40 @@ function Tile({
   const { icon, box } = TILE_TONE[tone];
   return (
     <div
-      className={`flex h-[29dvh] flex-none flex-col items-center justify-center rounded-3xl px-4 py-6 text-center transition-colors ${box}`}
+      className={`flex min-h-0 flex-[3] flex-col items-center justify-center rounded-3xl px-4 py-3 text-center transition-colors ${box}`}
     >
       <span className="text-sm font-bold uppercase tracking-widest opacity-80">{label}</span>
       <span className="mt-1 flex items-center gap-2 text-4xl font-black leading-tight sm:text-5xl">
+        <span aria-hidden="true">{icon}</span>
+        {text}
+      </span>
+    </div>
+  );
+}
+
+// Lower-urgency informational fields (Splits, 3-Tech) — paired side-by-side
+// in one shared row rather than each claiming a full-width block, so they
+// stay legible without competing with Personnel/Flat/Formation for space.
+function CompactTile({
+  label,
+  text,
+  icon,
+  flagged,
+}: {
+  label: string;
+  text: string;
+  icon: string;
+  flagged: boolean;
+}) {
+  return (
+    <div
+      className={[
+        "flex min-h-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-2xl border-4 px-3 py-2 text-center transition-colors",
+        flagged ? "border-black bg-amber-400 text-black" : "border-black/15 bg-slate-900 text-slate-100",
+      ].join(" ")}
+    >
+      <span className="text-[11px] font-bold uppercase tracking-widest opacity-80">{label}</span>
+      <span className="flex items-center gap-2 text-lg font-black sm:text-xl">
         <span aria-hidden="true">{icon}</span>
         {text}
       </span>
@@ -256,7 +292,7 @@ export default function SidelinePage() {
   }
 
   return (
-    <main className="flex flex-1 flex-col gap-3 p-4">
+    <main className="flex h-dvh flex-col gap-3 overflow-hidden p-4">
       <header className="flex items-center justify-between">
         <h1 className="text-lg font-bold text-slate-50">Sideline</h1>
         <SwitchRole current="sideline" />
@@ -289,8 +325,8 @@ export default function SidelinePage() {
       )}
 
       {game?.status !== "complete" && currentPlay && (
-        <div className="flex flex-1 flex-col gap-3">
-          <div className="grid min-h-[9dvh] flex-1 grid-cols-3 items-center gap-2 rounded-2xl bg-slate-900 px-3 py-3 text-center">
+        <div className="flex min-h-0 flex-1 flex-col gap-3">
+          <div className="grid min-h-[9dvh] flex-none grid-cols-3 items-center gap-2 rounded-2xl bg-slate-900 px-3 py-3 text-center">
             <div className="flex flex-col">
               <span className="text-[11px] font-bold uppercase tracking-widest text-slate-300">
                 Drive
@@ -315,7 +351,11 @@ export default function SidelinePage() {
             </div>
           </div>
 
-          <div className="flex flex-none flex-col gap-3">
+          {/* Fills whatever vertical space remains after the top bar and
+              freshness bar — Personnel/Flat/Formation get 3 parts each,
+              the paired Splits/3-Tech row gets 2, so the split adjusts
+              automatically whether 2 or 3 rows are actually present. */}
+          <div className="flex min-h-0 flex-1 flex-col gap-3">
             <Tile
               label="Personnel"
               text={
@@ -342,36 +382,26 @@ export default function SidelinePage() {
               />
             )}
 
-            {currentPlay.mode === "OFFENSE" && (
-              <Tile
-                label="3-Tech"
-                text={THREE_TECH_LABELS[currentPlay.three_tech ?? "HEADS_UP"]}
-                tone="neutral"
-              />
-            )}
+            {currentPlay.mode === "OFFENSE" && (() => {
+              const flagged = currentPlay.splits && currentPlay.splits !== "NONE";
+              return (
+                <div className="flex min-h-0 flex-[2] gap-3">
+                  <CompactTile
+                    label="Splits"
+                    text={SPLITS_LABELS[currentPlay.splits ?? "NONE"]}
+                    icon={flagged ? "⚠" : "✓"}
+                    flagged={!!flagged}
+                  />
+                  <CompactTile
+                    label="3-Tech"
+                    text={THREE_TECH_LABELS[currentPlay.three_tech ?? "HEADS_UP"]}
+                    icon="•"
+                    flagged={false}
+                  />
+                </div>
+              );
+            })()}
           </div>
-
-          {currentPlay.mode === "OFFENSE" && (() => {
-            const flagged = currentPlay.splits && currentPlay.splits !== "NONE";
-            return (
-              <div
-                className={[
-                  "flex min-h-[6dvh] flex-none flex-col items-center justify-center gap-0.5 rounded-2xl border-4 px-4 py-2 text-center transition-colors",
-                  flagged
-                    ? "border-black bg-amber-400 text-black"
-                    : "border-black/15 bg-slate-900 text-slate-100",
-                ].join(" ")}
-              >
-                <span className="text-[11px] font-bold uppercase tracking-widest opacity-80">
-                  Splits
-                </span>
-                <span className="flex items-center gap-2 text-lg font-black sm:text-xl">
-                  <span aria-hidden="true">{flagged ? "⚠" : "✓"}</span>
-                  {SPLITS_LABELS[currentPlay.splits ?? "NONE"]}
-                </span>
-              </div>
-            );
-          })()}
         </div>
       )}
 
