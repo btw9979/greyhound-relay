@@ -10,7 +10,15 @@ import {
   computeGameStats,
   updateFinalScore,
 } from "@/lib/plays";
-import type { Game, Play, GameStats } from "@/lib/plays";
+import type {
+  Game,
+  Play,
+  GameStats,
+  PlayLogRow,
+  RushingStats,
+  PassingStats,
+  TotalStats,
+} from "@/lib/plays";
 import { SwitchRole } from "@/components/SwitchRole";
 import { useWakeLock } from "@/lib/useWakeLock";
 import { useOrientationLock } from "@/lib/useOrientationLock";
@@ -222,22 +230,18 @@ export default function SidelinePage() {
     let cancelled = false;
 
     (async () => {
+      // computeGameStats needs chronological order — 3rd Down Conversions
+      // depends on play sequence, not just independent per-row totals.
       const { data } = await supabase
         .from("plays")
-        .select("mode, result_type, result_yards, score_play_type")
-        .eq("game_id", game.id);
+        .select("mode, down, result_type, result_yards, score_play_type")
+        .eq("game_id", game.id)
+        .order("created_at", { ascending: true });
 
       if (cancelled || !data) return;
       setSummary({
         gameId: game.id,
-        stats: computeGameStats(
-          data as {
-            mode: "OFFENSE" | "DEFENSE";
-            result_type: Play["result_type"];
-            result_yards: number | null;
-            score_play_type: Play["score_play_type"];
-          }[],
-        ),
+        stats: computeGameStats(data as PlayLogRow[]),
       });
     })();
 
@@ -432,25 +436,15 @@ function GameSummary({
       />
 
       <StatTile title="Offense" accent="offense">
-        <StatsTable
-          rushYards={stats?.offense.rushYards ?? null}
-          passYards={stats?.offense.passYards ?? null}
-          sackCount={stats?.offense.sackCount ?? null}
-          sackYards={stats?.offense.sackYards ?? null}
-          totalLabel="Total Offense"
-          total={stats?.offense.total ?? null}
-        />
+        <MiniTable heading="Rushing" rows={offenseRushingRows(stats?.offense.rushing)} />
+        <MiniTable heading="Passing" rows={offensePassingRows(stats?.offense.passing)} />
+        <MiniTable heading="Total" rows={offenseTotalRows(stats?.offense.total)} emphasizeLast />
       </StatTile>
 
       <StatTile title="Defense" accent="defense">
-        <StatsTable
-          rushYards={stats?.defense.rushYards ?? null}
-          passYards={stats?.defense.passYards ?? null}
-          sackCount={stats?.defense.sackCount ?? null}
-          sackYards={stats?.defense.sackYards ?? null}
-          totalLabel="Total Defense"
-          total={stats?.defense.total ?? null}
-        />
+        <MiniTable heading="Rushing" rows={defenseRushingRows(stats?.defense.rushing)} />
+        <MiniTable heading="Passing" rows={defensePassingRows(stats?.defense.passing)} />
+        <MiniTable heading="Total" rows={defenseTotalRows(stats?.defense.total)} emphasizeLast />
       </StatTile>
 
       <button
@@ -608,47 +602,117 @@ function StatTile({
   );
 }
 
-function StatsTable({
-  rushYards,
-  passYards,
-  sackCount,
-  sackYards,
-  totalLabel,
-  total,
+function fmtInt(v: number | null | undefined): string {
+  return v === null || v === undefined ? "—" : String(v);
+}
+
+function fmtRate(v: number | null | undefined): string {
+  return v === null || v === undefined ? "—" : v.toFixed(1);
+}
+
+function fmtFraction(made: number | undefined, of: number | undefined): string {
+  return made === undefined || of === undefined ? "—/—" : `${made}/${of}`;
+}
+
+type StatRow = readonly [label: string, value: string];
+
+function offenseRushingRows(r: RushingStats | undefined): StatRow[] {
+  return [
+    ["Rushing Attempts", fmtInt(r?.attempts)],
+    ["Rush", fmtInt(r?.yards)],
+    ["Yards Per Carry", fmtRate(r?.yardsPerCarry)],
+    ["Rushing TDs", fmtInt(r?.touchdowns)],
+  ];
+}
+
+function offensePassingRows(p: PassingStats | undefined): StatRow[] {
+  return [
+    ["Pass", fmtInt(p?.yards)],
+    ["Completions", fmtFraction(p?.completions, p?.attempts)],
+    ["Yards Per Completion", fmtRate(p?.yardsPerCompletion)],
+    ["Yards Per Attempt", fmtRate(p?.yardsPerAttempt)],
+    ["Sacks", fmtInt(p?.sackCount)],
+    ["Sack Yards", fmtInt(p?.sackYards)],
+    ["Passing TDs", fmtInt(p?.touchdowns)],
+  ];
+}
+
+function offenseTotalRows(t: TotalStats | undefined): StatRow[] {
+  return [
+    ["Total Offensive Plays", fmtInt(t?.plays)],
+    ["First Downs", fmtInt(t?.firstDowns)],
+    ["3rd Down Conversions", fmtFraction(t?.thirdDownConversions, t?.thirdDownAttempts)],
+    ["Total Offense", fmtInt(t?.yards)],
+  ];
+}
+
+function defenseRushingRows(r: RushingStats | undefined): StatRow[] {
+  return [
+    ["Rushing Attempts Allowed", fmtInt(r?.attempts)],
+    ["Rush Allowed", fmtInt(r?.yards)],
+    ["Yards Per Carry Allowed", fmtRate(r?.yardsPerCarry)],
+    ["Rushing TDs Allowed", fmtInt(r?.touchdowns)],
+  ];
+}
+
+function defensePassingRows(p: PassingStats | undefined): StatRow[] {
+  return [
+    ["Pass Allowed", fmtInt(p?.yards)],
+    ["Completions Allowed", fmtFraction(p?.completions, p?.attempts)],
+    ["Yards Per Completion Allowed", fmtRate(p?.yardsPerCompletion)],
+    ["Yards Per Attempt Allowed", fmtRate(p?.yardsPerAttempt)],
+    ["Sacks", fmtInt(p?.sackCount)],
+    ["Sack Yards", fmtInt(p?.sackYards)],
+    ["Passing TDs Allowed", fmtInt(p?.touchdowns)],
+  ];
+}
+
+function defenseTotalRows(t: TotalStats | undefined): StatRow[] {
+  return [
+    ["Total Defensive Plays", fmtInt(t?.plays)],
+    ["First Downs Allowed", fmtInt(t?.firstDowns)],
+    ["3rd Down Conversions Allowed", fmtFraction(t?.thirdDownConversions, t?.thirdDownAttempts)],
+    ["Total Defense", fmtInt(t?.yards)],
+  ];
+}
+
+/** One of the three stacked tables (Rushing/Passing/Total) inside a StatTile. */
+function MiniTable({
+  heading,
+  rows,
+  emphasizeLast = false,
 }: {
-  rushYards: number | null;
-  passYards: number | null;
-  sackCount: number | null;
-  sackYards: number | null;
-  totalLabel: string;
-  total: number | null;
+  heading: string;
+  rows: StatRow[];
+  emphasizeLast?: boolean;
 }) {
-  const fmt = (v: number | null) => (v === null ? "—" : v);
   return (
-    <table className="w-full text-sm">
-      <tbody className="divide-y divide-slate-800">
-        <tr>
-          <td className="py-2 text-slate-300">Rush</td>
-          <td className="py-2 text-right font-bold text-slate-50">{fmt(rushYards)}</td>
-        </tr>
-        <tr>
-          <td className="py-2 text-slate-300">Pass</td>
-          <td className="py-2 text-right font-bold text-slate-50">{fmt(passYards)}</td>
-        </tr>
-        <tr>
-          <td className="py-2 text-slate-300">Sacks</td>
-          <td className="py-2 text-right font-bold text-slate-50">{fmt(sackCount)}</td>
-        </tr>
-        <tr>
-          <td className="py-2 text-slate-300">Sack Yards</td>
-          <td className="py-2 text-right font-bold text-slate-50">{fmt(sackYards)}</td>
-        </tr>
-        <tr className="border-t-2 border-slate-700">
-          <td className="pt-3 font-bold text-slate-100">{totalLabel}</td>
-          <td className="pt-3 text-right text-xl font-black text-slate-50">{fmt(total)}</td>
-        </tr>
-      </tbody>
-    </table>
+    <div>
+      <h3 className="mb-1.5 text-xs font-bold uppercase tracking-widest text-slate-400">{heading}</h3>
+      <table className="w-full text-sm">
+        <tbody className="divide-y divide-slate-800">
+          {rows.map(([label, value], i) => {
+            const last = emphasizeLast && i === rows.length - 1;
+            return (
+              <tr key={label} className={last ? "border-t-2 border-slate-700" : undefined}>
+                <td className={last ? "pt-2.5 font-bold text-slate-100" : "py-1.5 text-slate-300"}>
+                  {label}
+                </td>
+                <td
+                  className={
+                    last
+                      ? "pt-2.5 text-right text-lg font-black text-slate-50"
+                      : "py-1.5 text-right font-bold text-slate-50"
+                  }
+                >
+                  {value}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

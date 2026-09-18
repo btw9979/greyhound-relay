@@ -288,15 +288,44 @@ export async function updateFinalScore(
   if (error) throw error;
 }
 
+export interface RushingStats {
+  attempts: number;
+  /** Includes rushing-TD yardage (score_play_type = 'RUN' SCORE rows). */
+  yards: number;
+  yardsPerCarry: number | null;
+  touchdowns: number;
+}
+
+export interface PassingStats {
+  /** Includes passing-TD yardage (score_play_type = 'PASS_COMPLETE' SCORE rows). */
+  yards: number;
+  completions: number;
+  /** Pass Complete + Pass Incomplete. */
+  attempts: number;
+  yardsPerCompletion: number | null;
+  yardsPerAttempt: number | null;
+  /** Grouped under Passing, not its own table — a sack is a failed passing play. */
+  sackCount: number;
+  /** Always <= 0 — signed the same way result_yards is stored. */
+  sackYards: number;
+  touchdowns: number;
+}
+
+export interface TotalStats {
+  /** Run + Pass Complete + Pass Incomplete + Sack — SCORE rows aren't counted as a distinct play here. */
+  plays: number;
+  firstDowns: number;
+  thirdDownConversions: number;
+  thirdDownAttempts: number;
+  /** NFHS/NCAA "Total Offense"/"Total Defense": rushing.yards + passing.yards + passing.sackYards. */
+  yards: number;
+}
+
 /** Team-level scrimmage stats for one side of the ball (offense or defense). */
 export interface SideStats {
-  rushYards: number;
-  passYards: number;
-  sackCount: number;
-  /** Always <= 0 — yardage lost on sacks, signed the same way result_yards is stored. */
-  sackYards: number;
-  /** NFHS/NCAA "Total Offense"/"Total Defense": rush + pass + sackYards (sackYards already negative). */
-  total: number;
+  rushing: RushingStats;
+  passing: PassingStats;
+  total: TotalStats;
 }
 
 export interface GameStats {
@@ -305,44 +334,135 @@ export interface GameStats {
 }
 
 function emptySideStats(): SideStats {
-  return { rushYards: 0, passYards: 0, sackCount: 0, sackYards: 0, total: 0 };
+  return {
+    rushing: { attempts: 0, yards: 0, yardsPerCarry: null, touchdowns: 0 },
+    passing: {
+      yards: 0,
+      completions: 0,
+      attempts: 0,
+      yardsPerCompletion: null,
+      yardsPerAttempt: null,
+      sackCount: 0,
+      sackYards: 0,
+      touchdowns: 0,
+    },
+    total: { plays: 0, firstDowns: 0, thirdDownConversions: 0, thirdDownAttempts: 0, yards: 0 },
+  };
+}
+
+/**
+ * A row's own `down` comes back from Postgres as text ('1'..'4'/'P') even
+ * though the app's in-memory state treats it as a number — normalize
+ * either representation, with "P" (always a drive's opening snap) as 1.
+ */
+function downAsNumber(down: Down | string): number {
+  return down === "P" ? 1 : Number(down);
+}
+
+export interface PlayLogRow {
+  mode: Mode;
+  down: Down;
+  result_type: ResultType | null;
+  result_yards: number | null;
+  score_play_type: ScorePlayType | null;
 }
 
 /**
  * Builds the EoG summary's Offense/Defense stat tables from the game's full
- * play log. RUN, PASS_COMPLETE, SACK, and SCORE rows contribute — the other
- * result types (and presnap-only rows, where result_type is null) carry no
- * yardage relevant to Total Offense/Defense. A SCORE row is itself a real
- * run or pass (score_play_type says which) and folds into that same
- * Rush/Pass bucket rather than being counted separately — a legacy SCORE
- * row from before this field existed has score_play_type null and is
- * excluded, same as it was before this distinction was tracked.
+ * play log, which MUST be given in chronological order (oldest first) —
+ * unlike the other stats here, 3rd Down Conversions depends on play
+ * sequence, not just independent per-row totals.
+ *
+ * A row's own down/distance describe the state for the coming play, not
+ * the down its own play was snapped on (that's what lets the live
+ * Sideline screen show the upcoming presnap read) — so "was this play run
+ * on 3rd down" has to be read off the *previous* row, tracked here as
+ * `enteringDown`.
+ *
+ * SCORE rows fold into Rush/Pass yardage and their own TD counters
+ * (score_play_type says which) but — like every other attempt/count stat
+ * here — are excluded from Attempts, Total Plays, First Downs, and 3rd
+ * Down Conversions, which only look at RUN/PASS_COMPLETE/PASS_INCOMPLETE/
+ * SACK rows (plus PENALTY for First Downs). A legacy SCORE row predating
+ * this field has score_play_type null and contributes no yardage/TD
+ * count, same as before that distinction was tracked.
  */
-export function computeGameStats(
-  plays: {
-    mode: Mode;
-    result_type: ResultType | null;
-    result_yards: number | null;
-    score_play_type: ScorePlayType | null;
-  }[],
-): GameStats {
+export function computeGameStats(plays: PlayLogRow[]): GameStats {
   const offense = emptySideStats();
   const defense = emptySideStats();
 
+  // The down the *next* row's play will be snapped on, carried forward
+  // from each row's own `down` field. Starts null; the very first row of
+  // a game is always a new-drive marker (down = 'P'), so no real play is
+  // ever attempted before one is seen.
+  let enteringDown: Down | null = null;
+
   for (const row of plays) {
-    if (row.result_yards === null) continue;
     const side = row.mode === "OFFENSE" ? offense : defense;
-    const asRunOrPass = row.result_type === "SCORE" ? row.score_play_type : row.result_type;
-    if (asRunOrPass === "RUN") side.rushYards += row.result_yards;
-    else if (asRunOrPass === "PASS_COMPLETE") side.passYards += row.result_yards;
-    else if (row.result_type === "SACK") {
-      side.sackCount += 1;
-      side.sackYards += row.result_yards;
+    const attemptedOn = enteringDown;
+    enteringDown = row.down;
+
+    if (row.result_type === null) continue;
+
+    if (row.result_type === "SACK" && row.result_yards !== null) {
+      side.passing.sackCount += 1;
+      side.passing.sackYards += row.result_yards;
+    }
+
+    if (row.result_type === "SCORE") {
+      if (row.result_yards !== null) {
+        if (row.score_play_type === "RUN") side.rushing.yards += row.result_yards;
+        else if (row.score_play_type === "PASS_COMPLETE") side.passing.yards += row.result_yards;
+      }
+      if (row.score_play_type === "RUN") side.rushing.touchdowns += 1;
+      else if (row.score_play_type === "PASS_COMPLETE") side.passing.touchdowns += 1;
+      continue;
+    }
+
+    if (row.result_type === "RUN" && row.result_yards !== null) {
+      side.rushing.yards += row.result_yards;
+      side.rushing.attempts += 1;
+    }
+    if (row.result_type === "PASS_COMPLETE" && row.result_yards !== null) {
+      side.passing.yards += row.result_yards;
+      side.passing.completions += 1;
+    }
+    if (row.result_type === "PASS_COMPLETE" || row.result_type === "PASS_INCOMPLETE") {
+      side.passing.attempts += 1;
+    }
+
+    if (
+      row.result_type === "RUN" ||
+      row.result_type === "PASS_COMPLETE" ||
+      row.result_type === "PASS_INCOMPLETE" ||
+      row.result_type === "SACK"
+    ) {
+      side.total.plays += 1;
+      if (attemptedOn !== null && downAsNumber(attemptedOn) === 3) {
+        side.total.thirdDownAttempts += 1;
+        if (downAsNumber(row.down) === 1) side.total.thirdDownConversions += 1;
+      }
+    }
+
+    if (
+      (row.result_type === "RUN" ||
+        row.result_type === "PASS_COMPLETE" ||
+        row.result_type === "PASS_INCOMPLETE" ||
+        row.result_type === "PENALTY") &&
+      downAsNumber(row.down) === 1
+    ) {
+      side.total.firstDowns += 1;
     }
   }
 
   for (const side of [offense, defense]) {
-    side.total = side.rushYards + side.passYards + side.sackYards;
+    side.rushing.yardsPerCarry =
+      side.rushing.attempts > 0 ? side.rushing.yards / side.rushing.attempts : null;
+    side.passing.yardsPerCompletion =
+      side.passing.completions > 0 ? side.passing.yards / side.passing.completions : null;
+    side.passing.yardsPerAttempt =
+      side.passing.attempts > 0 ? side.passing.yards / side.passing.attempts : null;
+    side.total.yards = side.rushing.yards + side.passing.yards + side.passing.sackYards;
   }
 
   return { offense, defense };
