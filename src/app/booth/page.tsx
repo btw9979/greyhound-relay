@@ -6,6 +6,7 @@ import { createClient } from "@/lib/supabase/client";
 import {
   applyRunOrPassResult,
   attackingFieldPosition,
+  computeGameStats,
   endGame,
   formatDownDistance,
   formatFieldPosition,
@@ -26,11 +27,13 @@ import type {
   Flat,
   Formation,
   Game,
+  GameStats,
   GameType,
   Hash,
   Mode,
   Personnel,
   Play,
+  PlayLogRow,
   ResultType,
   ScorePlayType,
   Splits,
@@ -39,6 +42,7 @@ import type {
 import { SwitchRole } from "@/components/SwitchRole";
 import { Sheet } from "@/components/Sheet";
 import { ExceptionToggle } from "@/components/ExceptionToggle";
+import { StatBreakdown } from "@/components/StatBreakdown";
 
 type TapStatus = "idle" | "sending" | "sent" | "error";
 
@@ -205,6 +209,14 @@ export default function BoothPage() {
 
   const [endGameScoreUs, setEndGameScoreUs] = useState("");
   const [endGameScoreOpponent, setEndGameScoreOpponent] = useState("");
+
+  // On-demand mid-game stats snapshot ("Live Stats") — a quick look at the
+  // same Offense/Defense breakdown the EoG summary shows, computed from
+  // whatever's been logged so far. Purely a read: never touches game.status
+  // or any play-logging state.
+  const [liveStatsOpen, setLiveStatsOpen] = useState(false);
+  const [liveStats, setLiveStats] = useState<GameStats | null>(null);
+  const [liveStatsLoading, setLiveStatsLoading] = useState(false);
 
   const [pendingResult, setPendingResult] = useState<ResultType | null>(null);
   const [yardageSign, setYardageSign] = useState<1 | -1>(1);
@@ -377,6 +389,23 @@ export default function BoothPage() {
   async function handleLogout() {
     await supabase.auth.signOut();
     router.push("/login");
+  }
+
+  // computeGameStats needs chronological order — 3rd Down Conversions
+  // depends on play sequence, not just independent per-row totals. Same
+  // query shape as the Sideline EoG summary's fetch, just invoked on demand
+  // instead of gated on game.status === "complete".
+  async function openLiveStats() {
+    if (!game) return;
+    setLiveStatsOpen(true);
+    setLiveStatsLoading(true);
+    const { data } = await supabase
+      .from("plays")
+      .select("mode, down, result_type, result_yards, score_play_type")
+      .eq("game_id", game.id)
+      .order("created_at", { ascending: true });
+    setLiveStats(data ? computeGameStats(data as PlayLogRow[]) : null);
+    setLiveStatsLoading(false);
   }
 
   // The mode the about-to-start drive will use: a pending switch if one is
@@ -621,6 +650,7 @@ export default function BoothPage() {
         <header className="flex items-center justify-between">
           <h1 className="text-lg font-bold text-slate-50">Booth</h1>
           <div className="flex items-center gap-3">
+            <LiveStatsButton onClick={openLiveStats} disabled={!game} />
             <ManageGameButton onClick={() => setSheet("manageGame")} />
             <SwitchRole current="booth" />
           </div>
@@ -693,6 +723,14 @@ export default function BoothPage() {
             onConfirm={confirmEndGame}
           />
         )}
+
+        {liveStatsOpen && (
+          <LiveStatsOverlay
+            stats={liveStats}
+            loading={liveStatsLoading}
+            onClose={() => setLiveStatsOpen(false)}
+          />
+        )}
       </main>
     );
   }
@@ -703,6 +741,7 @@ export default function BoothPage() {
         <h1 className="text-lg font-bold text-slate-50">Booth</h1>
         <div className="flex items-center gap-3">
           <StatusPill status={status} />
+          <LiveStatsButton onClick={openLiveStats} disabled={!game} />
           <ManageGameButton onClick={() => setSheet("manageGame")} />
           <SwitchRole current="booth" />
         </div>
@@ -1047,7 +1086,70 @@ export default function BoothPage() {
           </div>
         </Sheet>
       )}
+
+      {liveStatsOpen && (
+        <LiveStatsOverlay
+          stats={liveStats}
+          loading={liveStatsLoading}
+          onClose={() => setLiveStatsOpen(false)}
+        />
+      )}
     </main>
+  );
+}
+
+function LiveStatsButton({ onClick, disabled }: { onClick: () => void; disabled: boolean }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="rounded-full border border-slate-600 px-3 py-1 text-xs font-medium uppercase tracking-wide text-slate-300 active:bg-slate-800 disabled:opacity-40"
+    >
+      Live Stats
+    </button>
+  );
+}
+
+/**
+ * On-demand mid-game stats snapshot — same Offense/Defense tables as the
+ * Sideline EoG summary (via the shared StatBreakdown), just without a final
+ * score section, since the game may still be in progress. A full-screen
+ * overlay (not the bottom Sheet drawer other Booth actions use) since the
+ * content can run longer than one screen and needs its own scroll; a single
+ * Close button keeps it a quick look, not a mode the booth can get stuck in.
+ */
+function LiveStatsOverlay({
+  stats,
+  loading,
+  onClose,
+}: {
+  stats: GameStats | null;
+  loading: boolean;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-30 flex flex-col bg-slate-950">
+      <header className="flex flex-none items-center justify-between border-b border-slate-800 px-5 py-4">
+        <h2 className="text-lg font-bold text-slate-50">Live Stats</h2>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-full bg-slate-800 px-4 py-2 text-sm font-semibold text-slate-300 active:bg-slate-700"
+        >
+          Close
+        </button>
+      </header>
+      <div className="flex-1 overflow-y-auto p-5">
+        {loading ? (
+          <p className="text-center text-sm text-slate-400">Loading…</p>
+        ) : (
+          <div className="flex flex-col items-center gap-6 pb-8">
+            <StatBreakdown stats={stats} />
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
