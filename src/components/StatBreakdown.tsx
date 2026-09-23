@@ -68,6 +68,7 @@ function offensePassingRows(p: PassingStats | undefined): StatRow[] {
     ["Yards Per Attempt", fmtRate(p?.yardsPerAttempt)],
     ["Sacks", fmtInt(p?.sackCount)],
     ["Sack Yards", fmtInt(p?.sackYards)],
+    ["Interceptions Thrown", fmtInt(p?.interceptions)],
     ["Passing TDs", fmtInt(p?.touchdowns)],
   ];
 }
@@ -98,6 +99,7 @@ function defensePassingRows(p: PassingStats | undefined): StatRow[] {
     ["Yards Per Attempt Allowed", fmtRate(p?.yardsPerAttempt)],
     ["Sacks", fmtInt(p?.sackCount)],
     ["Sack Yards", fmtInt(p?.sackYards)],
+    ["Interceptions Made", fmtInt(p?.interceptions)],
     ["Passing TDs Allowed", fmtInt(p?.touchdowns)],
   ];
 }

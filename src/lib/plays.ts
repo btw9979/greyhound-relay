@@ -36,9 +36,28 @@ export type ResultType =
   | "SACK"
   | "PENALTY"
   | "TURNOVER"
-  | "SCORE";
+  | "SCORE"
+  // Offense's failed pass attempt, picked off — counts as a pass attempt
+  // (not a completion); see computeGameStats and the Turnover > INT flow.
+  | "INTERCEPTION"
+  // Marker row for an FG attempt (good or no good) — not a play. Replaces
+  // the old workaround of logging FGs as a Turnover.
+  | "FIELD_GOAL"
+  // Marker row for a "no play" safety (Score > Safety > Other) — not a
+  // play. A Run/Sack safety instead reuses RUN/SACK with negative yardage.
+  | "SAFETY";
 /** Which kind of play a touchdown was — see Play.score_play_type. */
 export type ScorePlayType = "RUN" | "PASS_COMPLETE";
+
+export type ScoringTeam = "us" | "opponent";
+export type ScoreRecordType = "TD" | "FG" | "SAFETY";
+/** How a TD happened — see the scores table's method column. */
+export type ScoreMethod = "RUN" | "PASS" | "INT" | "FR" | "KR";
+export type FgResult = "GOOD" | "NO_GOOD";
+export type ConversionType = "PAT" | "TWO_POINT" | "NONE";
+/** A PAT is always a kick; only a 2-point attempt has a method. */
+export type ConversionMethod = "RUN" | "PASS";
+export type ConversionResult = "GOOD" | "NO_GOOD";
 
 /** Shared state common to both modes, plus exactly one mode's fields. */
 export type OffenseState = {
@@ -311,6 +330,131 @@ export async function updateFinalScore(
   if (error) throw error;
 }
 
+/**
+ * One row per score (TD/FG/SAFETY) — see migration 0012. `play_id` is null
+ * when no offensive play produced the score (a KR return, or the return
+ * itself on an INT/FR return-for-TD — the underlying turnover attempt is a
+ * separate, already-logged play). Conversion fields are null until
+ * `updateScoreConversion` fills them in, a moment after the TD row is
+ * created.
+ */
+export interface Score {
+  id: string;
+  game_id: string;
+  play_id: string | null;
+  quarter: Quarter;
+  clock: string | null;
+  scoring_team: ScoringTeam;
+  score_type: ScoreRecordType;
+  method: ScoreMethod | null;
+  distance_yards: number | null;
+  player_number: string | null;
+  player_name: string | null;
+  passer_number: string | null;
+  passer_name: string | null;
+  fg_result: FgResult | null;
+  conversion_type: ConversionType | null;
+  conversion_method: ConversionMethod | null;
+  conversion_result: ConversionResult | null;
+  conversion_player_number: string | null;
+  conversion_player_name: string | null;
+  conversion_passer_number: string | null;
+  conversion_passer_name: string | null;
+  created_at: string;
+  created_by: string | null;
+}
+
+export interface NewScore {
+  gameId: string;
+  playId: string | null;
+  quarter: Quarter;
+  clock: string | null;
+  scoringTeam: ScoringTeam;
+  scoreType: ScoreRecordType;
+  method?: ScoreMethod | null;
+  distanceYards?: number | null;
+  playerNumber?: string | null;
+  playerName?: string | null;
+  passerNumber?: string | null;
+  passerName?: string | null;
+  fgResult?: FgResult | null;
+}
+
+/** Booth-only: creates a score record. A TD's conversion is added afterward via updateScoreConversion. */
+export async function insertScore(
+  supabase: SupabaseClient,
+  userId: string,
+  score: NewScore,
+): Promise<Score> {
+  const { data, error } = await supabase
+    .from("scores")
+    .insert({
+      game_id: score.gameId,
+      play_id: score.playId,
+      quarter: score.quarter,
+      clock: score.clock,
+      scoring_team: score.scoringTeam,
+      score_type: score.scoreType,
+      method: score.method ?? null,
+      distance_yards: score.distanceYards ?? null,
+      player_number: score.playerNumber ?? null,
+      player_name: score.playerName ?? null,
+      passer_number: score.passerNumber ?? null,
+      passer_name: score.passerName ?? null,
+      fg_result: score.fgResult ?? null,
+      created_by: userId,
+    })
+    .select("*")
+    .single();
+
+  if (error) throw error;
+  return data as Score;
+}
+
+export interface ScoreConversion {
+  type: ConversionType;
+  method?: ConversionMethod | null;
+  result?: ConversionResult | null;
+  playerNumber?: string | null;
+  playerName?: string | null;
+  passerNumber?: string | null;
+  passerName?: string | null;
+}
+
+/** Booth-only: records the conversion attempt on an already-created TD score record. */
+export async function updateScoreConversion(
+  supabase: SupabaseClient,
+  scoreId: string,
+  conversion: ScoreConversion,
+): Promise<void> {
+  const { error } = await supabase
+    .from("scores")
+    .update({
+      conversion_type: conversion.type,
+      conversion_method: conversion.method ?? null,
+      conversion_result: conversion.result ?? null,
+      conversion_player_number: conversion.playerNumber ?? null,
+      conversion_player_name: conversion.playerName ?? null,
+      conversion_passer_number: conversion.passerNumber ?? null,
+      conversion_passer_name: conversion.passerName ?? null,
+    })
+    .eq("id", scoreId);
+
+  if (error) throw error;
+}
+
+/** Formats raw typed digits ("127") as mm:ss ("1:27") — see the Score flow's Time field. */
+export function formatClockDigits(digits: string): string {
+  const seconds = digits.slice(-2).padStart(2, "0");
+  const minutes = digits.slice(0, -2);
+  return `${minutes === "" ? "0" : minutes}:${seconds}`;
+}
+
+/** Converts raw typed digits to the value stored on a score record — empty input stays optional (null). */
+export function clockValueForSubmit(digits: string): string | null {
+  return digits === "" ? null : formatClockDigits(digits);
+}
+
 export interface RushingStats {
   attempts: number;
   /** Includes rushing-TD yardage (score_play_type = 'RUN' SCORE rows). */
@@ -332,6 +476,8 @@ export interface PassingStats {
   /** Always <= 0 — signed the same way result_yards is stored. */
   sackYards: number;
   touchdowns: number;
+  /** Interceptions thrown (offense) or made (defense) — see result_type 'INTERCEPTION'. */
+  interceptions: number;
 }
 
 export interface TotalStats {
@@ -368,6 +514,7 @@ function emptySideStats(): SideStats {
       sackCount: 0,
       sackYards: 0,
       touchdowns: 0,
+      interceptions: 0,
     },
     total: { plays: 0, firstDowns: 0, thirdDownConversions: 0, thirdDownAttempts: 0, yards: 0 },
   };
@@ -409,6 +556,16 @@ export interface PlayLogRow {
  * Conversion if it happened on 3rd down. A legacy SCORE row from before
  * score_play_type existed has it null and is excluded entirely, same as
  * before that distinction was tracked.
+ *
+ * INTERCEPTION counts as a pass attempt (not a completion) and as a play —
+ * including toward 3rd Down Attempts — but never toward First Downs or a
+ * 3rd Down Conversion: an interception is a turnover, so even though the
+ * booth logs it with real down/distance math (via applyRunOrPassResult,
+ * same as an incomplete pass), its own `down` field can only ever reflect
+ * "didn't convert." FIELD_GOAL and a "no play" SAFETY are both excluded
+ * entirely, same as a plain Turnover always has been. A Run/Sack safety
+ * instead reuses RUN/SACK with negative yardage, so it's already covered
+ * by the ordinary Rushing/Sack handling below — no special-casing needed.
  */
 export function computeGameStats(plays: PlayLogRow[]): GameStats {
   const offense = emptySideStats();
@@ -432,6 +589,10 @@ export function computeGameStats(plays: PlayLogRow[]): GameStats {
       side.passing.sackYards += row.result_yards;
     }
 
+    if (row.result_type === "INTERCEPTION") {
+      side.passing.interceptions += 1;
+    }
+
     const isScore = row.result_type === "SCORE";
     if (isScore && row.score_play_type === null) continue;
 
@@ -450,7 +611,11 @@ export function computeGameStats(plays: PlayLogRow[]): GameStats {
       side.passing.yards += row.result_yards;
       side.passing.completions += 1;
     }
-    if (effectiveType === "PASS_COMPLETE" || effectiveType === "PASS_INCOMPLETE") {
+    if (
+      effectiveType === "PASS_COMPLETE" ||
+      effectiveType === "PASS_INCOMPLETE" ||
+      effectiveType === "INTERCEPTION"
+    ) {
       side.passing.attempts += 1;
     }
 
@@ -458,7 +623,8 @@ export function computeGameStats(plays: PlayLogRow[]): GameStats {
       effectiveType === "RUN" ||
       effectiveType === "PASS_COMPLETE" ||
       effectiveType === "PASS_INCOMPLETE" ||
-      effectiveType === "SACK"
+      effectiveType === "SACK" ||
+      effectiveType === "INTERCEPTION"
     ) {
       side.total.plays += 1;
       if (attemptedOn !== null && downAsNumber(attemptedOn) === 3) {

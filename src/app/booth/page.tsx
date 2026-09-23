@@ -6,13 +6,17 @@ import { createClient } from "@/lib/supabase/client";
 import {
   applyRunOrPassResult,
   attackingFieldPosition,
+  clockValueForSubmit,
   computeGameStats,
   endGame,
+  formatClockDigits,
   formatDownDistance,
   formatFieldPosition,
   getCurrentGame,
+  insertScore,
   normalizePlayFromDb,
   startNewGame,
+  updateScoreConversion,
   DEFAULT_DISTANCE,
   DEFAULT_DOWN,
   DEFAULT_FLAT,
@@ -24,7 +28,10 @@ import {
   DEFAULT_THREE_TECH,
 } from "@/lib/plays";
 import type {
+  ConversionMethod,
+  ConversionResult,
   Down,
+  FgResult,
   Flat,
   Formation,
   Game,
@@ -37,7 +44,10 @@ import type {
   PlayLogRow,
   Quarter,
   ResultType,
+  ScoreConversion,
+  ScoreMethod,
   ScorePlayType,
+  ScoringTeam,
   Splits,
   ThreeTech,
 } from "@/lib/plays";
@@ -47,6 +57,28 @@ import { ExceptionToggle } from "@/components/ExceptionToggle";
 import { StatBreakdown } from "@/components/StatBreakdown";
 
 type TapStatus = "idle" | "sending" | "sent" | "error";
+
+/**
+ * What the shared TD details/conversion steps need to know but don't
+ * themselves collect: which method, who scored, the play this TD is linked
+ * to (if any, for `scores.play_id`), and the mode/field position to hand
+ * `triggerAutoNewDrive` once the whole TD — details and conversion — is
+ * done. See section 4 of the scoring-capture plan.
+ */
+interface PendingTd {
+  method: ScoreMethod;
+  scoringTeam: ScoringTeam;
+  playId: string | null;
+  distance: number | null;
+  // Field position at the moment of the score — triggerAutoNewDrive's
+  // SCORE kind actually ignores this (always a touchback), but it's kept
+  // for the function's shared signature. Deliberately no `fromMode` here:
+  // for a Run/Pass TD the scoring team is whoever was on offense, but for
+  // KR/INT/FR it's the *other* side, so `fromMode` is derived from
+  // `scoringTeam` at the point of use (see modeForScoringTeam) rather than
+  // captured here, where it would be easy to get backwards.
+  fromFieldPosition: number;
+}
 
 interface GameState {
   driveNumber: number;
@@ -169,6 +201,9 @@ const RESULT_LABELS: Record<ResultType, string> = {
   PENALTY: "Penalty",
   TURNOVER: "Turnover",
   SCORE: "TD",
+  INTERCEPTION: "Interception",
+  FIELD_GOAL: "Field Goal",
+  SAFETY: "Safety",
 };
 
 export default function BoothPage() {
@@ -205,6 +240,22 @@ export default function BoothPage() {
     | "endGameConfirm"
     | "confirmModeSwitch"
     | "confirmFieldPosition"
+    // Score > TD/FG/Safety (section 2-6 of the scoring-capture plan)
+    | "score"
+    | "scoreTdMethod"
+    | "scoreTdKrTeam"
+    | "scoreTdDetails"
+    | "scoreTdConversion"
+    | "scoreTdConversionPat"
+    | "scoreTdConversionTwoPoint"
+    | "scoreFgResult"
+    | "scoreFgDetails"
+    | "scoreSafetyMethod"
+    | "scoreSafetyDetails"
+    // Turnover > INT/Fumble/Punt/Other (section 7)
+    | "turnoverType"
+    | "turnoverFumblePlay"
+    | "turnoverReturnedForTd"
     | null
   >(null);
   const [newDriveField, setNewDriveField] = useState("");
@@ -231,6 +282,57 @@ export default function BoothPage() {
   const [penaltyDown, setPenaltyDown] = useState(String(DEFAULT_DOWN));
   const [penaltyDistance, setPenaltyDistance] = useState("10");
   const [penaltyFieldPosition, setPenaltyFieldPosition] = useState("50");
+
+  // TD details + conversion (section 4) — shared by every TD path: Run/Pass
+  // (immediate), KR, and INT/FR returns (section 7). `pendingTd` holds what
+  // the details/conversion steps need to know but don't themselves collect:
+  // which method, who scored, the play this TD is linked to (if any), and
+  // the mode/field position to hand to triggerAutoNewDrive once the whole
+  // TD — details and conversion both — is done.
+  const [pendingTd, setPendingTd] = useState<PendingTd | null>(null);
+  const [tdTime, setTdTime] = useState("");
+  const [tdPlayerNumber, setTdPlayerNumber] = useState("");
+  const [tdPlayerName, setTdPlayerName] = useState("");
+  const [tdPasserNumber, setTdPasserNumber] = useState("");
+  const [tdPasserName, setTdPasserName] = useState("");
+  const [tdReturnDistance, setTdReturnDistance] = useState("");
+  // The just-created scores row — set once the details step submits, so the
+  // conversion step (a separate UPDATE) knows which row to amend.
+  const [pendingScoreId, setPendingScoreId] = useState<string | null>(null);
+
+  const [conversionMethod, setConversionMethod] = useState<ConversionMethod>("RUN");
+  const [conversionPlayerNumber, setConversionPlayerNumber] = useState("");
+  const [conversionPlayerName, setConversionPlayerName] = useState("");
+  const [conversionPasserNumber, setConversionPasserNumber] = useState("");
+  const [conversionPasserName, setConversionPasserName] = useState("");
+
+  const [fgResult, setFgResult] = useState<FgResult>("GOOD");
+  const [fgDistance, setFgDistance] = useState("");
+  const [fgTime, setFgTime] = useState("");
+  const [fgKickerNumber, setFgKickerNumber] = useState("");
+  const [fgKickerName, setFgKickerName] = useState("");
+
+  const [safetyTime, setSafetyTime] = useState("");
+  const [safetyTacklerNumber, setSafetyTacklerNumber] = useState("");
+  const [safetyTacklerName, setSafetyTacklerName] = useState("");
+
+  const [turnoverFumblePlayType, setTurnoverFumblePlayType] = useState<"RUN" | "PASS_COMPLETE">(
+    "RUN",
+  );
+  const [turnoverFumbleYards, setTurnoverFumbleYards] = useState("0");
+  // Which turnover produced the current "Returned for a TD?" prompt — only
+  // INT and Fumble offer it; Punt/Other never reach this state.
+  const [turnoverReturnMethod, setTurnoverReturnMethod] = useState<"INT" | "FR" | null>(null);
+
+  // Bridges a Run/Sack/Other safety's underlying play (or lack of one) to
+  // the details step and, from there, to the post-safety new-drive handoff.
+  const [pendingSafety, setPendingSafety] = useState<{
+    playId: string | null;
+    fromMode: Mode;
+    fromFieldPosition: number;
+  } | null>(null);
+
+  const [krTeam, setKrTeam] = useState<ScoringTeam>("us");
 
   useEffect(() => {
     let cancelled = false;
@@ -296,37 +398,43 @@ export default function BoothPage() {
     };
   }, [supabase]);
 
+  // Returns the inserted row's id (so scoring flows can link a scores row
+  // to the play that produced it via play_id), or null on failure.
   const insert = useCallback(
     async (
       next: GameState,
       result: { type: ResultType; yards: number | null; scorePlayType?: ScorePlayType } | null,
-    ) => {
-      if (!game || !userId) return false;
+    ): Promise<string | null> => {
+      if (!game || !userId) return null;
       setStatus("sending");
-      const { error } = await supabase.from("plays").insert({
-        game_id: game.id,
-        created_by: userId,
-        drive_number: next.driveNumber,
-        mode: next.mode,
-        down: next.down,
-        distance: next.distance,
-        field_position: next.fieldPosition,
-        personnel: next.personnel,
-        flat: next.mode === "OFFENSE" ? next.flat : null,
-        splits: next.mode === "OFFENSE" ? next.splits : null,
-        formation: next.mode === "DEFENSE" ? next.formation : null,
-        hash: next.mode === "OFFENSE" ? next.hash : null,
-        three_tech: next.mode === "OFFENSE" ? next.threeTech : null,
-        quarter: next.quarter,
-        result_type: result?.type ?? null,
-        result_yards: result?.yards ?? null,
-        score_play_type: result?.scorePlayType ?? null,
-      });
+      const { data, error } = await supabase
+        .from("plays")
+        .insert({
+          game_id: game.id,
+          created_by: userId,
+          drive_number: next.driveNumber,
+          mode: next.mode,
+          down: next.down,
+          distance: next.distance,
+          field_position: next.fieldPosition,
+          personnel: next.personnel,
+          flat: next.mode === "OFFENSE" ? next.flat : null,
+          splits: next.mode === "OFFENSE" ? next.splits : null,
+          formation: next.mode === "DEFENSE" ? next.formation : null,
+          hash: next.mode === "OFFENSE" ? next.hash : null,
+          three_tech: next.mode === "OFFENSE" ? next.threeTech : null,
+          quarter: next.quarter,
+          result_type: result?.type ?? null,
+          result_yards: result?.yards ?? null,
+          score_play_type: result?.scorePlayType ?? null,
+        })
+        .select("id")
+        .single();
       setStatus(error ? "error" : "sent");
       if (!error) {
         setTimeout(() => setStatus((s) => (s === "sent" ? "idle" : s)), 1500);
       }
-      return !error;
+      return error ? null : (data as { id: string }).id;
     },
     [game, userId, supabase],
   );
@@ -426,9 +534,9 @@ export default function BoothPage() {
   async function advanceQuarter(newQuarter: Quarter): Promise<boolean> {
     if (!state) return false;
     const next: GameState = { ...state, quarter: newQuarter };
-    const ok = await insert(next, null);
-    if (ok) setState(next);
-    return ok;
+    const id = await insert(next, null);
+    if (id) setState(next);
+    return !!id;
   }
 
   function closeEndQuarter() {
@@ -583,14 +691,14 @@ export default function BoothPage() {
       // before this screen ever shows, for the second-half kickoff case).
       quarter: state?.quarter ?? DEFAULT_QUARTER,
     };
-    const ok = await insert(next, null);
-    if (ok) {
+    const id = await insert(next, null);
+    if (id) {
       setState(next);
       setSheet(null);
       resetDriveFlow();
       setAwaitingSecondHalf(false);
     }
-    return ok;
+    return !!id;
   }
 
   function acceptDefaultFieldPosition() {
@@ -618,13 +726,17 @@ export default function BoothPage() {
     setSheet("result");
   }
 
+  // Returns the inserted play's id (or null on failure) — SCORE-type
+  // callers need it to link a scores row via play_id, so unlike the
+  // boolean helpers above this hands back the id itself; truthiness still
+  // works for callers that only care whether the write succeeded.
   async function submitResult(
     type: ResultType,
     yards: number | null,
     overrides?: Partial<GameState>,
     scorePlayType?: ScorePlayType,
-  ): Promise<boolean> {
-    if (!state) return false;
+  ): Promise<string | null> {
+    if (!state) return null;
     const next: GameState = {
       ...state,
       ...overrides,
@@ -635,19 +747,21 @@ export default function BoothPage() {
       hash: DEFAULT_HASH,
       threeTech: DEFAULT_THREE_TECH,
     };
-    const ok = await insert(next, { type, yards, scorePlayType });
-    if (!ok) return false;
+    const id = await insert(next, { type, yards, scorePlayType });
+    if (!id) return null;
     setState(next);
     setSheet(null);
     setPendingResult(null);
 
-    // Unlike the manual toggle, Turnover/Score unambiguously mean a mode
-    // switch and a new drive — no confirmation prompt, straight to the
-    // field-position step.
-    if (type === "TURNOVER" || type === "SCORE") {
+    // A plain Turnover (Punt/Other) unambiguously means a mode switch and a
+    // new drive — no confirmation prompt, straight to the field-position
+    // step. SCORE (always a Run/Pass TD now — see submitScore) instead
+    // waits for the TD details/conversion flow to finish before triggering
+    // the same handoff.
+    if (type === "TURNOVER") {
       triggerAutoNewDrive(next.mode, next.fieldPosition, type);
     }
-    return true;
+    return id;
   }
 
   function submitRunOrPass(type: "RUN" | "PASS_COMPLETE" | "SACK") {
@@ -700,14 +814,56 @@ export default function BoothPage() {
     });
   }
 
-  function submitScore(scorePlayType: ScorePlayType) {
+  // Team currently on offense, as a scores.scoring_team value.
+  function offenseTeam(mode: Mode): ScoringTeam {
+    return mode === "OFFENSE" ? "us" : "opponent";
+  }
+  function defenseTeam(mode: Mode): ScoringTeam {
+    return mode === "OFFENSE" ? "opponent" : "us";
+  }
+  // Inverse of offenseTeam — the mode the scoring team would be "on
+  // offense" in, which is what triggerAutoNewDrive needs as fromMode (the
+  // team about to kick off is always whoever just scored, regardless of
+  // whether they were on offense or defense for the play that produced it).
+  function modeForScoringTeam(team: ScoringTeam): Mode {
+    return team === "us" ? "OFFENSE" : "DEFENSE";
+  }
+
+  function openTdDetails(pending: PendingTd) {
+    setPendingTd(pending);
+    setPendingScoreId(null);
+    setTdTime("");
+    setTdPlayerNumber("");
+    setTdPlayerName("");
+    setTdPasserNumber("");
+    setTdPasserName("");
+    setTdReturnDistance("");
+    setSheet("scoreTdDetails");
+  }
+
+  // Run/Pass TD (Score > TD > Run/Pass) — unchanged mechanically from
+  // before this update (same yardage calc, same rushing/passing stat
+  // attribution via the existing SCORE/score_play_type handling); the only
+  // difference is that the post-TD new-drive handoff now waits for the
+  // details/conversion flow instead of firing immediately.
+  async function submitScoreRunOrPass(scorePlayType: ScorePlayType) {
     if (!state) return;
+    const fromMode = state.mode;
+    const fromFieldPosition = state.fieldPosition;
     // A score is a real scrimmage play covering a real distance — from the
     // current spot to the goal line — not just a drive-ending event with
     // no yardage, unlike Turnover/Penalty. Computed the same way P & Goal
     // is: the current offense's attacking-frame distance to the goal.
     const yards = attackingFieldPosition(state.mode, state.fieldPosition);
-    submitResult("SCORE", yards, undefined, scorePlayType);
+    const playId = await submitResult("SCORE", yards, undefined, scorePlayType);
+    if (!playId) return;
+    openTdDetails({
+      method: scorePlayType === "RUN" ? "RUN" : "PASS",
+      scoringTeam: offenseTeam(fromMode),
+      playId,
+      distance: yards,
+      fromFieldPosition,
+    });
   }
 
   function submitPenalty() {
@@ -718,6 +874,304 @@ export default function BoothPage() {
     if (!Number.isInteger(distance) || distance < 0) return;
     if (!Number.isInteger(fp) || fp < 1 || fp > 99) return;
     submitResult("PENALTY", null, { down: down as 1 | 2 | 3 | 4, distance, fieldPosition: fp });
+  }
+
+  // ---- Scoring capture (Score > TD/FG/Safety, Turnover > INT/Fumble) ----
+  //
+  // Shared ground rule across every path below: once the underlying play
+  // (if any) is actually logged, nothing in the details/conversion forms
+  // that follow may block the booth from moving on to the next snap — a
+  // failed detail/conversion save shows initError but still proceeds
+  // straight to the post-score new-drive handoff. See the plan's "must not
+  // slow down live data entry" requirement.
+
+  async function finishConversion(conversion: ScoreConversion) {
+    if (!pendingTd) return;
+    if (pendingScoreId) {
+      try {
+        await updateScoreConversion(supabase, pendingScoreId, conversion);
+      } catch {
+        setInitError("Couldn't save the conversion. Check connection and try again.");
+      }
+    }
+    const { scoringTeam, fromFieldPosition } = pendingTd;
+    setPendingTd(null);
+    setPendingScoreId(null);
+    setSheet(null);
+    triggerAutoNewDrive(modeForScoringTeam(scoringTeam), fromFieldPosition, "SCORE");
+  }
+
+  function submitConversionNone() {
+    finishConversion({ type: "NONE" });
+  }
+
+  function submitConversionPat(result: ConversionResult) {
+    finishConversion({
+      type: "PAT",
+      result,
+      playerNumber: conversionPlayerNumber || null,
+      playerName: conversionPlayerName || null,
+    });
+  }
+
+  function submitConversionTwoPoint(result: ConversionResult) {
+    finishConversion({
+      type: "TWO_POINT",
+      method: conversionMethod,
+      result,
+      playerNumber: conversionPlayerNumber || null,
+      playerName: conversionPlayerName || null,
+      passerNumber: conversionMethod === "PASS" ? conversionPasserNumber || null : null,
+      passerName: conversionMethod === "PASS" ? conversionPasserName || null : null,
+    });
+  }
+
+  async function submitTdDetails() {
+    if (!pendingTd || !state || !userId || !game) return;
+    const distance =
+      pendingTd.distance !== null
+        ? pendingTd.distance
+        : tdReturnDistance === ""
+          ? null
+          : Number(tdReturnDistance);
+    try {
+      const score = await insertScore(supabase, userId, {
+        gameId: game.id,
+        playId: pendingTd.playId,
+        quarter: state.quarter,
+        clock: clockValueForSubmit(tdTime),
+        scoringTeam: pendingTd.scoringTeam,
+        scoreType: "TD",
+        method: pendingTd.method,
+        distanceYards: distance,
+        playerNumber: tdPlayerNumber || null,
+        playerName: tdPlayerName || null,
+        passerNumber: pendingTd.method === "PASS" ? tdPasserNumber || null : null,
+        passerName: pendingTd.method === "PASS" ? tdPasserName || null : null,
+      });
+      setPendingScoreId(score.id);
+      setConversionMethod("RUN");
+      setConversionPlayerNumber("");
+      setConversionPlayerName("");
+      setConversionPasserNumber("");
+      setConversionPasserName("");
+      setSheet("scoreTdConversion");
+    } catch {
+      setInitError("Couldn't save the score. Check connection and try again.");
+      const { scoringTeam, fromFieldPosition } = pendingTd;
+      setPendingTd(null);
+      setSheet(null);
+      triggerAutoNewDrive(modeForScoringTeam(scoringTeam), fromFieldPosition, "SCORE");
+    }
+  }
+
+  // KR (kickoff/punt returned for a TD) — no offensive play is recorded.
+  function openScoreTdKr() {
+    if (!state) return;
+    // A drive with no logged plays yet (down still "P") is almost always a
+    // kickoff return; anything past that is almost always a punt return.
+    setKrTeam(state.down === "P" ? offenseTeam(state.mode) : defenseTeam(state.mode));
+    setSheet("scoreTdKrTeam");
+  }
+
+  function submitScoreTdKr() {
+    if (!state) return;
+    openTdDetails({
+      method: "KR",
+      scoringTeam: krTeam,
+      playId: null,
+      distance: null,
+      fromFieldPosition: state.fieldPosition,
+    });
+  }
+
+  function openScoreFg() {
+    setFgResult("GOOD");
+    setSheet("scoreFgResult");
+  }
+
+  function chooseFgResult(result: FgResult) {
+    if (!state) return;
+    setFgResult(result);
+    // Line of scrimmage to the goal the offense is attacking, plus the
+    // standard 17-yard allowance (10 for the end zone + 7 for the snap).
+    setFgDistance(String(attackingFieldPosition(state.mode, state.fieldPosition) + 17));
+    setFgTime("");
+    setFgKickerNumber("");
+    setFgKickerName("");
+    setSheet("scoreFgDetails");
+  }
+
+  async function submitFgDetails() {
+    if (!state || !userId || !game) return;
+    const distance = Number(fgDistance);
+    if (!Number.isInteger(distance) || distance < 0) return;
+    // Not a play: down/distance/field position carry over unchanged, same
+    // as the marker row a plain Turnover writes.
+    const playId = await submitResult("FIELD_GOAL", null);
+    if (!playId) return;
+    try {
+      await insertScore(supabase, userId, {
+        gameId: game.id,
+        playId,
+        quarter: state.quarter,
+        clock: clockValueForSubmit(fgTime),
+        scoringTeam: offenseTeam(state.mode),
+        scoreType: "FG",
+        distanceYards: distance,
+        playerNumber: fgKickerNumber || null,
+        playerName: fgKickerName || null,
+        fgResult,
+      });
+    } catch {
+      setInitError("Couldn't save the score. Check connection and try again.");
+    }
+    // Both outcomes flip possession the same way a plain Turnover does —
+    // fixed spot, unchanged, adjustable on the field-position prompt.
+    triggerAutoNewDrive(state.mode, state.fieldPosition, "TURNOVER");
+  }
+
+  function openScoreSafety() {
+    setSheet("scoreSafetyMethod");
+  }
+
+  async function chooseSafetyMethod(method: "RUN" | "SACK" | "OTHER") {
+    if (!state) return;
+    const fromMode = state.mode;
+    let playId: string | null;
+    let fromFieldPosition: number;
+
+    if (method === "OTHER") {
+      // Not a play: down/distance/field position unchanged, no yardage.
+      playId = await submitResult("SAFETY", null);
+      fromFieldPosition = state.fieldPosition;
+    } else {
+      // Loss from the line of scrimmage back to the goal line the offense
+      // is defending — attackingFieldPosition gives the distance to the
+      // goal it's ATTACKING, so the defended goal is the complement of that.
+      const safetyYards = attackingFieldPosition(state.mode, state.fieldPosition) - 100;
+      const calc = applyRunOrPassResult({
+        mode: state.mode,
+        down: state.down,
+        distance: state.distance,
+        fieldPosition: state.fieldPosition,
+        gainYards: safetyYards,
+      });
+      playId = await submitResult(method, safetyYards, {
+        down: calc.down as 1 | 2 | 3 | 4,
+        distance: calc.distance,
+        fieldPosition: calc.fieldPosition,
+      });
+      fromFieldPosition = calc.fieldPosition;
+    }
+
+    if (!playId) return;
+    setPendingSafety({ playId, fromMode, fromFieldPosition });
+    setSafetyTime("");
+    setSafetyTacklerNumber("");
+    setSafetyTacklerName("");
+    setSheet("scoreSafetyDetails");
+  }
+
+  async function submitSafetyDetails() {
+    if (!pendingSafety || !userId || !game) return;
+    try {
+      await insertScore(supabase, userId, {
+        gameId: game.id,
+        playId: pendingSafety.playId,
+        quarter: state?.quarter ?? DEFAULT_QUARTER,
+        clock: clockValueForSubmit(safetyTime),
+        scoringTeam: defenseTeam(pendingSafety.fromMode),
+        scoreType: "SAFETY",
+        playerNumber: safetyTacklerNumber || null,
+        playerName: safetyTacklerName || null,
+      });
+    } catch {
+      setInitError("Couldn't save the score. Check connection and try again.");
+    }
+    const { fromMode, fromFieldPosition } = pendingSafety;
+    setPendingSafety(null);
+    setSheet(null);
+    // A safety's free kick flips possession to the scoring team, same
+    // touchback-style default as any other score.
+    triggerAutoNewDrive(fromMode, fromFieldPosition, "SCORE");
+  }
+
+  // Turnover > INT/Fumble/Punt/Other (section 7).
+
+  async function chooseTurnoverInt() {
+    if (!state) return;
+    // Behaves like an incomplete pass for down/distance purposes (0 yards,
+    // down advances, no first down) — the turnover then takes effect at
+    // whatever spot that leaves the ball, same as any other turnover.
+    const calc = applyRunOrPassResult({
+      mode: state.mode,
+      down: state.down,
+      distance: state.distance,
+      fieldPosition: state.fieldPosition,
+      gainYards: 0,
+    });
+    const playId = await submitResult("INTERCEPTION", 0, {
+      down: calc.down as 1 | 2 | 3 | 4,
+      distance: calc.distance,
+      fieldPosition: calc.fieldPosition,
+    });
+    if (!playId) return;
+    setTurnoverReturnMethod("INT");
+    setSheet("turnoverReturnedForTd");
+  }
+
+  function openTurnoverFumble() {
+    setTurnoverFumblePlayType("RUN");
+    setTurnoverFumbleYards("0");
+    setSheet("turnoverFumblePlay");
+  }
+
+  async function submitTurnoverFumble() {
+    if (!state) return;
+    const raw = turnoverFumbleYards.trim();
+    const yards = raw === "" ? 0 : Number(raw);
+    if (!Number.isFinite(yards)) return;
+    const calc = applyRunOrPassResult({
+      mode: state.mode,
+      down: state.down,
+      distance: state.distance,
+      fieldPosition: state.fieldPosition,
+      gainYards: yards,
+    });
+    const playId = await submitResult(turnoverFumblePlayType, yards, {
+      down: calc.down as 1 | 2 | 3 | 4,
+      distance: calc.distance,
+      fieldPosition: calc.fieldPosition,
+    });
+    if (!playId) return;
+    setTurnoverReturnMethod("FR");
+    setSheet("turnoverReturnedForTd");
+  }
+
+  function submitTurnoverPuntOrOther() {
+    submitResult("TURNOVER", null);
+  }
+
+  function turnoverReturnedForTd(yes: boolean) {
+    if (!state || !turnoverReturnMethod) return;
+    if (!yes) {
+      setTurnoverReturnMethod(null);
+      // triggerAutoNewDrive sets its own sheet ("confirmFieldPosition") as
+      // its last step — no separate setSheet(null) here, which would only
+      // clobber that in the same render batch.
+      triggerAutoNewDrive(state.mode, state.fieldPosition, "TURNOVER");
+      return;
+    }
+    const method = turnoverReturnMethod;
+    setTurnoverReturnMethod(null);
+    openTdDetails({
+      method,
+      scoringTeam: defenseTeam(state.mode),
+      playId: null,
+      distance: null,
+      fromFieldPosition: state.fieldPosition,
+    });
   }
 
   if (!state || awaitingSecondHalf) {
@@ -1064,17 +1518,17 @@ export default function BoothPage() {
             </button>
             <button
               type="button"
-              onClick={() => submitResult("TURNOVER", null)}
+              onClick={() => setSheet("turnoverType")}
               className="rounded-xl bg-red-600 px-4 py-4 text-base font-semibold text-white active:bg-red-700"
             >
               {RESULT_LABELS.TURNOVER}
             </button>
             <button
               type="button"
-              onClick={() => setPendingResult("SCORE")}
+              onClick={() => setSheet("score")}
               className="rounded-xl bg-emerald-600 px-4 py-4 text-base font-semibold text-white active:bg-emerald-700"
             >
-              {RESULT_LABELS.SCORE}
+              Score
             </button>
           </div>
 
@@ -1105,22 +1559,414 @@ export default function BoothPage() {
         />
       )}
 
-      {sheet === "result" && pendingResult === "SCORE" && (
-        <Sheet title="TD — Run or Pass?" onClose={() => setPendingResult(null)}>
-          <div className="grid grid-cols-2 gap-3">
+      {sheet === "score" && (
+        <Sheet title="Score" onClose={() => setSheet("result")}>
+          <div className="grid grid-cols-3 gap-3">
             <button
               type="button"
-              onClick={() => submitScore("RUN")}
+              onClick={() => setSheet("scoreTdMethod")}
+              className="rounded-xl bg-emerald-600 px-4 py-6 text-lg font-bold text-white active:bg-emerald-700"
+            >
+              TD
+            </button>
+            <button
+              type="button"
+              onClick={openScoreFg}
+              className="rounded-xl bg-emerald-600 px-4 py-6 text-lg font-bold text-white active:bg-emerald-700"
+            >
+              FG
+            </button>
+            <button
+              type="button"
+              onClick={openScoreSafety}
+              className="rounded-xl bg-emerald-600 px-4 py-6 text-lg font-bold text-white active:bg-emerald-700"
+            >
+              Safety
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "scoreTdMethod" && (
+        <Sheet title="TD — How?" onClose={() => setSheet("score")}>
+          <div className="grid grid-cols-3 gap-3">
+            <button
+              type="button"
+              onClick={() => submitScoreRunOrPass("RUN")}
               className="rounded-xl bg-emerald-600 px-4 py-6 text-lg font-bold text-white active:bg-emerald-700"
             >
               Run
             </button>
             <button
               type="button"
-              onClick={() => submitScore("PASS_COMPLETE")}
+              onClick={() => submitScoreRunOrPass("PASS_COMPLETE")}
               className="rounded-xl bg-emerald-600 px-4 py-6 text-lg font-bold text-white active:bg-emerald-700"
             >
               Pass
+            </button>
+            <button
+              type="button"
+              onClick={openScoreTdKr}
+              className="rounded-xl bg-emerald-600 px-4 py-6 text-lg font-bold text-white active:bg-emerald-700"
+            >
+              KR
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "scoreTdKrTeam" && (
+        <Sheet title="KR — Scoring Team?" onClose={() => setSheet("scoreTdMethod")}>
+          <div className="flex flex-col gap-4">
+            <ToggleRow
+              label="Scoring Team"
+              value={krTeam}
+              disabled={false}
+              onSelect={setKrTeam}
+              options={[
+                { value: "us", text: "Us", clean: true },
+                { value: "opponent", text: "Opp", clean: true },
+              ]}
+            />
+            <button
+              type="button"
+              onClick={submitScoreTdKr}
+              className="rounded-xl bg-emerald-600 px-4 py-4 text-lg font-bold text-white active:bg-emerald-700"
+            >
+              Continue
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "scoreTdDetails" && pendingTd && (
+        <TdDetailsSheet
+          method={pendingTd.method}
+          time={tdTime}
+          setTime={setTdTime}
+          playerNumber={tdPlayerNumber}
+          setPlayerNumber={setTdPlayerNumber}
+          playerName={tdPlayerName}
+          setPlayerName={setTdPlayerName}
+          passerNumber={tdPasserNumber}
+          setPasserNumber={setTdPasserNumber}
+          passerName={tdPasserName}
+          setPasserName={setTdPasserName}
+          returnDistance={tdReturnDistance}
+          setReturnDistance={setTdReturnDistance}
+          onClose={submitTdDetails}
+          onSubmit={submitTdDetails}
+        />
+      )}
+
+      {sheet === "scoreTdConversion" && (
+        <Sheet title="Conversion?" onClose={submitConversionNone}>
+          <div className="flex flex-col gap-4">
+            <button
+              type="button"
+              onClick={() => setSheet("scoreTdConversionPat")}
+              className="rounded-xl bg-slate-800 px-4 py-4 text-lg font-bold text-slate-100 active:bg-slate-700"
+            >
+              PAT
+            </button>
+            <button
+              type="button"
+              onClick={() => setSheet("scoreTdConversionTwoPoint")}
+              className="rounded-xl bg-slate-800 px-4 py-4 text-lg font-bold text-slate-100 active:bg-slate-700"
+            >
+              2-Point
+            </button>
+            <button
+              type="button"
+              onClick={submitConversionNone}
+              className="rounded-xl bg-slate-800 px-4 py-4 text-lg font-semibold text-slate-300 active:bg-slate-700"
+            >
+              No Attempt
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "scoreTdConversionPat" && (
+        <Sheet title="PAT" onClose={() => setSheet("scoreTdConversion")}>
+          <div className="flex flex-col gap-4">
+            <NumberField label="Kicker # (optional)" value={conversionPlayerNumber} onChange={setConversionPlayerNumber} />
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">
+                Kicker Name (optional)
+              </span>
+              <input
+                type="text"
+                value={conversionPlayerName}
+                onChange={(e) => setConversionPlayerName(e.target.value)}
+                className="rounded-xl bg-slate-800 px-4 py-3 text-lg font-bold text-slate-50"
+              />
+            </label>
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => submitConversionPat("GOOD")}
+                className="rounded-xl bg-emerald-600 px-4 py-4 text-lg font-bold text-white active:bg-emerald-700"
+              >
+                Good
+              </button>
+              <button
+                type="button"
+                onClick={() => submitConversionPat("NO_GOOD")}
+                className="rounded-xl bg-red-600 px-4 py-4 text-lg font-bold text-white active:bg-red-700"
+              >
+                No Good
+              </button>
+            </div>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "scoreTdConversionTwoPoint" && (
+        <Sheet title="2-Point" onClose={() => setSheet("scoreTdConversion")}>
+          <div className="flex flex-col gap-4">
+            <ToggleRow
+              label="Run or Pass"
+              value={conversionMethod}
+              disabled={false}
+              onSelect={setConversionMethod}
+              options={[
+                { value: "RUN", text: "Run", clean: true },
+                { value: "PASS", text: "Pass", clean: true },
+              ]}
+            />
+            <NumberField label="Player # (optional)" value={conversionPlayerNumber} onChange={setConversionPlayerNumber} />
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">
+                Player Name (optional)
+              </span>
+              <input
+                type="text"
+                value={conversionPlayerName}
+                onChange={(e) => setConversionPlayerName(e.target.value)}
+                className="rounded-xl bg-slate-800 px-4 py-3 text-lg font-bold text-slate-50"
+              />
+            </label>
+            {conversionMethod === "PASS" && (
+              <>
+                <NumberField label="Passer # (optional)" value={conversionPasserNumber} onChange={setConversionPasserNumber} />
+                <label className="flex flex-col gap-1">
+                  <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">
+                    Passer Name (optional)
+                  </span>
+                  <input
+                    type="text"
+                    value={conversionPasserName}
+                    onChange={(e) => setConversionPasserName(e.target.value)}
+                    className="rounded-xl bg-slate-800 px-4 py-3 text-lg font-bold text-slate-50"
+                  />
+                </label>
+              </>
+            )}
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => submitConversionTwoPoint("GOOD")}
+                className="rounded-xl bg-emerald-600 px-4 py-4 text-lg font-bold text-white active:bg-emerald-700"
+              >
+                Good
+              </button>
+              <button
+                type="button"
+                onClick={() => submitConversionTwoPoint("NO_GOOD")}
+                className="rounded-xl bg-red-600 px-4 py-4 text-lg font-bold text-white active:bg-red-700"
+              >
+                No Good
+              </button>
+            </div>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "scoreFgResult" && (
+        <Sheet title="Field Goal — Result?" onClose={() => setSheet("score")}>
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => chooseFgResult("GOOD")}
+              className="rounded-xl bg-emerald-600 px-4 py-6 text-lg font-bold text-white active:bg-emerald-700"
+            >
+              Good
+            </button>
+            <button
+              type="button"
+              onClick={() => chooseFgResult("NO_GOOD")}
+              className="rounded-xl bg-red-600 px-4 py-6 text-lg font-bold text-white active:bg-red-700"
+            >
+              No Good
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "scoreFgDetails" && (
+        <Sheet title={`Field Goal — ${fgResult === "GOOD" ? "Good" : "No Good"}`} onClose={submitFgDetails}>
+          <div className="flex flex-col gap-4">
+            <NumberField label="Distance (yards)" value={fgDistance} onChange={setFgDistance} />
+            <ClockField label="Time (optional)" digits={fgTime} onChange={setFgTime} />
+            <NumberField label="Kicker # (optional)" value={fgKickerNumber} onChange={setFgKickerNumber} />
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">
+                Kicker Name (optional)
+              </span>
+              <input
+                type="text"
+                value={fgKickerName}
+                onChange={(e) => setFgKickerName(e.target.value)}
+                className="rounded-xl bg-slate-800 px-4 py-3 text-lg font-bold text-slate-50"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={submitFgDetails}
+              className="rounded-xl bg-indigo-600 px-4 py-4 text-lg font-bold text-white active:bg-indigo-700"
+            >
+              Log Field Goal
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "scoreSafetyMethod" && (
+        <Sheet title="Safety — How?" onClose={() => setSheet("score")}>
+          <div className="grid grid-cols-3 gap-3">
+            <button
+              type="button"
+              onClick={() => chooseSafetyMethod("RUN")}
+              className="rounded-xl bg-emerald-600 px-4 py-6 text-lg font-bold text-white active:bg-emerald-700"
+            >
+              Run
+            </button>
+            <button
+              type="button"
+              onClick={() => chooseSafetyMethod("SACK")}
+              className="rounded-xl bg-emerald-600 px-4 py-6 text-lg font-bold text-white active:bg-emerald-700"
+            >
+              Sack
+            </button>
+            <button
+              type="button"
+              onClick={() => chooseSafetyMethod("OTHER")}
+              className="rounded-xl bg-emerald-600 px-4 py-6 text-lg font-bold text-white active:bg-emerald-700"
+            >
+              Other
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "scoreSafetyDetails" && (
+        <Sheet title="Safety Details" onClose={submitSafetyDetails}>
+          <div className="flex flex-col gap-4">
+            <ClockField label="Time (optional)" digits={safetyTime} onChange={setSafetyTime} />
+            <NumberField label="Tackler # (optional)" value={safetyTacklerNumber} onChange={setSafetyTacklerNumber} />
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">
+                Tackler Name (optional)
+              </span>
+              <input
+                type="text"
+                value={safetyTacklerName}
+                onChange={(e) => setSafetyTacklerName(e.target.value)}
+                className="rounded-xl bg-slate-800 px-4 py-3 text-lg font-bold text-slate-50"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={submitSafetyDetails}
+              className="rounded-xl bg-indigo-600 px-4 py-4 text-lg font-bold text-white active:bg-indigo-700"
+            >
+              Continue
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "turnoverType" && (
+        <Sheet title="Turnover — Type?" onClose={() => setSheet("result")}>
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={chooseTurnoverInt}
+              className="rounded-xl bg-red-600 px-4 py-6 text-lg font-bold text-white active:bg-red-700"
+            >
+              INT
+            </button>
+            <button
+              type="button"
+              onClick={openTurnoverFumble}
+              className="rounded-xl bg-red-600 px-4 py-6 text-lg font-bold text-white active:bg-red-700"
+            >
+              Fumble
+            </button>
+            <button
+              type="button"
+              onClick={submitTurnoverPuntOrOther}
+              className="rounded-xl bg-slate-800 px-4 py-6 text-lg font-bold text-slate-100 active:bg-slate-700"
+            >
+              Punt
+            </button>
+            <button
+              type="button"
+              onClick={submitTurnoverPuntOrOther}
+              className="rounded-xl bg-slate-800 px-4 py-6 text-lg font-bold text-slate-100 active:bg-slate-700"
+            >
+              Other
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "turnoverFumblePlay" && (
+        <Sheet title="Fumble — Offense's Play?" onClose={() => setSheet("turnoverType")}>
+          <div className="flex flex-col gap-4">
+            <ToggleRow
+              label="Play Type"
+              value={turnoverFumblePlayType}
+              disabled={false}
+              onSelect={setTurnoverFumblePlayType}
+              options={[
+                { value: "RUN", text: "Run", clean: true },
+                { value: "PASS_COMPLETE", text: "Pass Complete", clean: true },
+              ]}
+            />
+            <NumberField
+              label="Yards gained before the fumble (optional)"
+              value={turnoverFumbleYards}
+              onChange={setTurnoverFumbleYards}
+            />
+            <button
+              type="button"
+              onClick={submitTurnoverFumble}
+              className="rounded-xl bg-indigo-600 px-4 py-4 text-lg font-bold text-white active:bg-indigo-700"
+            >
+              Continue
+            </button>
+          </div>
+        </Sheet>
+      )}
+
+      {sheet === "turnoverReturnedForTd" && (
+        <Sheet title="Returned for a TD?" onClose={() => turnoverReturnedForTd(false)}>
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => turnoverReturnedForTd(true)}
+              className="rounded-xl bg-emerald-600 px-4 py-6 text-lg font-bold text-white active:bg-emerald-700"
+            >
+              Yes
+            </button>
+            <button
+              type="button"
+              onClick={() => turnoverReturnedForTd(false)}
+              className="rounded-xl bg-slate-800 px-4 py-6 text-lg font-bold text-slate-100 active:bg-slate-700"
+            >
+              No
             </button>
           </div>
         </Sheet>
@@ -1558,6 +2404,100 @@ function EndQuarterSheet({
   );
 }
 
+/**
+ * TD details form — shared by every TD path (Run/Pass, KR, INT/FR
+ * returns). Every field is optional; submitting with all of them blank
+ * must work (section 4). Passer fields only show for a passing TD; return
+ * distance only for a return (INT/FR/KR) — a Run/Pass TD's distance is
+ * already known (the scoring play's own yardage), so it isn't re-asked
+ * here.
+ */
+function TdDetailsSheet({
+  method,
+  time,
+  setTime,
+  playerNumber,
+  setPlayerNumber,
+  playerName,
+  setPlayerName,
+  passerNumber,
+  setPasserNumber,
+  passerName,
+  setPasserName,
+  returnDistance,
+  setReturnDistance,
+  onClose,
+  onSubmit,
+}: {
+  method: ScoreMethod;
+  time: string;
+  setTime: (v: string) => void;
+  playerNumber: string;
+  setPlayerNumber: (v: string) => void;
+  playerName: string;
+  setPlayerName: (v: string) => void;
+  passerNumber: string;
+  setPasserNumber: (v: string) => void;
+  passerName: string;
+  setPasserName: (v: string) => void;
+  returnDistance: string;
+  setReturnDistance: (v: string) => void;
+  onClose: () => void;
+  onSubmit: () => void;
+}) {
+  const isReturn = method === "INT" || method === "FR" || method === "KR";
+  const playerLabel = method === "PASS" ? "Receiver" : isReturn ? "Returner" : "Ball Carrier";
+  return (
+    <Sheet title="TD Details" onClose={onClose}>
+      <div className="flex flex-col gap-4">
+        <ClockField label="Time (optional)" digits={time} onChange={setTime} />
+        <NumberField label={`${playerLabel} # (optional)`} value={playerNumber} onChange={setPlayerNumber} />
+        <label className="flex flex-col gap-1">
+          <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">
+            {playerLabel} Name (optional)
+          </span>
+          <input
+            type="text"
+            value={playerName}
+            onChange={(e) => setPlayerName(e.target.value)}
+            className="rounded-xl bg-slate-800 px-4 py-3 text-lg font-bold text-slate-50"
+          />
+        </label>
+        {method === "PASS" && (
+          <>
+            <NumberField label="Passer # (optional)" value={passerNumber} onChange={setPasserNumber} />
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">
+                Passer Name (optional)
+              </span>
+              <input
+                type="text"
+                value={passerName}
+                onChange={(e) => setPasserName(e.target.value)}
+                className="rounded-xl bg-slate-800 px-4 py-3 text-lg font-bold text-slate-50"
+              />
+            </label>
+          </>
+        )}
+        {isReturn && (
+          <NumberField
+            label="Return Distance (optional)"
+            value={returnDistance}
+            onChange={setReturnDistance}
+          />
+        )}
+        <button
+          type="button"
+          onClick={onSubmit}
+          className="rounded-xl bg-indigo-600 px-4 py-4 text-lg font-bold text-white active:bg-indigo-700"
+        >
+          Continue
+        </button>
+      </div>
+    </Sheet>
+  );
+}
+
 function PracticeBanner() {
   return (
     <div className="rounded-xl bg-indigo-600 px-4 py-2 text-center text-sm font-bold uppercase tracking-widest text-white">
@@ -1614,6 +2554,35 @@ function NumberField({
         inputMode="numeric"
         value={value}
         onChange={(e) => onChange(e.target.value)}
+        className="rounded-xl bg-slate-800 px-4 py-3 text-xl font-bold text-slate-50"
+      />
+    </label>
+  );
+}
+
+/**
+ * Numeric-keypad time input that auto-formats as the operator types — "127"
+ * displays as "1:27". `digits` is the raw typed string (parent-held state,
+ * per this file's convention); the last 2 digits are always seconds.
+ */
+function ClockField({
+  label,
+  digits,
+  onChange,
+}: {
+  label: string;
+  digits: string;
+  onChange: (digits: string) => void;
+}) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">{label}</span>
+      <input
+        type="text"
+        inputMode="numeric"
+        value={digits === "" ? "" : formatClockDigits(digits)}
+        onChange={(e) => onChange(e.target.value.replace(/\D/g, "").slice(-4))}
+        placeholder="0:00"
         className="rounded-xl bg-slate-800 px-4 py-3 text-xl font-bold text-slate-50"
       />
     </label>
