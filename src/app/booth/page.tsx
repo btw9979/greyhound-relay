@@ -19,6 +19,7 @@ import {
   DEFAULT_FORMATION,
   DEFAULT_HASH,
   DEFAULT_PERSONNEL,
+  DEFAULT_QUARTER,
   DEFAULT_SPLITS,
   DEFAULT_THREE_TECH,
 } from "@/lib/plays";
@@ -34,6 +35,7 @@ import type {
   Personnel,
   Play,
   PlayLogRow,
+  Quarter,
   ResultType,
   ScorePlayType,
   Splits,
@@ -58,6 +60,7 @@ interface GameState {
   formation: Formation;
   hash: Hash;
   threeTech: ThreeTech;
+  quarter: Quarter;
 }
 
 function ToggleRow<T extends string>({
@@ -178,6 +181,10 @@ export default function BoothPage() {
   const [status, setStatus] = useState<TapStatus>("idle");
 
   const [state, setState] = useState<GameState | null>(null);
+  // True from a confirmed halftime (End Q2) until the second-half kickoff
+  // drive is actually started — forces the same start-of-drive screen a
+  // brand-new game shows, even though `state` already holds Q2's last play.
+  const [awaitingSecondHalf, setAwaitingSecondHalf] = useState(false);
   const [pendingMode, setPendingMode] = useState<Mode>("OFFENSE");
   // The mode a new drive should switch to when triggered via the
   // OFFENSE/DEFENSE toggle, a Turnover/Score result, or turnover on downs;
@@ -218,7 +225,7 @@ export default function BoothPage() {
   const [liveStats, setLiveStats] = useState<GameStats | null>(null);
   const [liveStatsLoading, setLiveStatsLoading] = useState(false);
 
-  const [pendingResult, setPendingResult] = useState<ResultType | null>(null);
+  const [pendingResult, setPendingResult] = useState<ResultType | "END_QUARTER" | null>(null);
   const [yardageSign, setYardageSign] = useState<1 | -1>(1);
   const [yardageMagnitude, setYardageMagnitude] = useState("0");
   const [penaltyDown, setPenaltyDown] = useState(String(DEFAULT_DOWN));
@@ -272,6 +279,7 @@ export default function BoothPage() {
             formation: p.formation ?? DEFAULT_FORMATION,
             hash: p.hash ?? DEFAULT_HASH,
             threeTech: p.three_tech ?? DEFAULT_THREE_TECH,
+            quarter: p.quarter ?? DEFAULT_QUARTER,
           });
         }
       } catch {
@@ -309,6 +317,7 @@ export default function BoothPage() {
         formation: next.mode === "DEFENSE" ? next.formation : null,
         hash: next.mode === "OFFENSE" ? next.hash : null,
         three_tech: next.mode === "OFFENSE" ? next.threeTech : null,
+        quarter: next.quarter,
         result_type: result?.type ?? null,
         result_yards: result?.yards ?? null,
         score_play_type: result?.scorePlayType ?? null,
@@ -357,6 +366,7 @@ export default function BoothPage() {
       });
       setGame(newGame);
       setState(null);
+      setAwaitingSecondHalf(false);
       setPendingMode(startingMode);
       resetDriveFlow();
       setSheet(null);
@@ -408,11 +418,70 @@ export default function BoothPage() {
     setLiveStatsLoading(false);
   }
 
+  // Writes a state-only row (result_type null, like updateAndSend) tagging
+  // the new quarter — never touches down/distance/field position/drive/
+  // mode. Awaited (unlike updateAndSend's fire-and-forget) so callers can
+  // gate what happens next (closing the sheet, opening the halftime kickoff
+  // screen) on the write actually succeeding.
+  async function advanceQuarter(newQuarter: Quarter): Promise<boolean> {
+    if (!state) return false;
+    const next: GameState = { ...state, quarter: newQuarter };
+    const ok = await insert(next, null);
+    if (ok) setState(next);
+    return ok;
+  }
+
+  function closeEndQuarter() {
+    setSheet(null);
+    setPendingResult(null);
+  }
+
+  // End of Q1/Q3: advance the tag only — the current drive continues
+  // unchanged (see plan section 3: teams switch ends, but field_position is
+  // relative to the opponent's goal, not a physical side, so nothing else
+  // needs to change).
+  async function confirmEndQuarterAdvance(nextQuarter: Quarter) {
+    const ok = await advanceQuarter(nextQuarter);
+    if (ok) closeEndQuarter();
+  }
+
+  // Halftime: advance to Q3, then hand off to the same start-of-drive
+  // screen a brand-new game shows (see the awaitingSecondHalf branch below)
+  // — replaces the old workaround of logging a Turnover to flip possession.
+  async function confirmHalftime() {
+    const ok = await advanceQuarter("Q3");
+    if (!ok) return;
+    closeEndQuarter();
+    // The team that received the opening kickoff normally kicks off to
+    // start the second half — preselect the opposite mode, but leave it
+    // changeable (the kicking team can still end up with the ball).
+    setPendingMode(game?.starting_mode === "OFFENSE" ? "DEFENSE" : "OFFENSE");
+    setAwaitingSecondHalf(true);
+  }
+
+  async function confirmStartOvertime() {
+    const ok = await advanceQuarter("OT");
+    if (ok) closeEndQuarter();
+  }
+
+  // All overtime periods share the same "OT" tag — nothing to write, just
+  // dismiss the prompt.
+  function confirmContinueOvertime() {
+    closeEndQuarter();
+  }
+
+  function goToEndGameFromQuarter() {
+    setPendingResult(null);
+    openEndGameConfirm();
+  }
+
   // The mode the about-to-start drive will use: a pending switch if one is
   // underway (toggle, Turnover/Score, or turnover on downs), otherwise the
-  // current state's mode — or, before any drive has ever started,
-  // whatever's selected on the bootstrap screen's mode toggle.
-  const effectiveMode = state ? pendingDriveMode ?? state.mode : pendingMode;
+  // current state's mode — or, before any drive has ever started (or during
+  // the halftime kickoff screen, which reuses that same bootstrap UI),
+  // whatever's selected on the mode toggle.
+  const effectiveMode =
+    state && !awaitingSecondHalf ? pendingDriveMode ?? state.mode : pendingMode;
 
   // field_position is a fixed physical coordinate — yards from the actual
   // opponent's goal line — independent of which team currently has the
@@ -444,9 +513,11 @@ export default function BoothPage() {
   // own — the mode is assumed to already be correct.
   function selectManualP() {
     resetDriveFlow();
-    // No previous play to default from yet (very first drive of the game)
-    // — go straight to manual entry.
-    if (!state) {
+    // No previous play to default from yet — either the very first drive of
+    // the game, or the second-half kickoff, where the last-known field
+    // position (from end of Q2) isn't a meaningful default. Both go
+    // straight to manual entry, same as the start of a game.
+    if (!state || awaitingSecondHalf) {
       openManualFieldPosition(null);
       return;
     }
@@ -507,12 +578,17 @@ export default function BoothPage() {
       formation: DEFAULT_FORMATION,
       hash: DEFAULT_HASH,
       threeTech: DEFAULT_THREE_TECH,
+      // Starting a drive never changes the quarter on its own — carries
+      // forward whatever's current (already bumped to Q3 by confirmHalftime
+      // before this screen ever shows, for the second-half kickoff case).
+      quarter: state?.quarter ?? DEFAULT_QUARTER,
     };
     const ok = await insert(next, null);
     if (ok) {
       setState(next);
       setSheet(null);
       resetDriveFlow();
+      setAwaitingSecondHalf(false);
     }
     return ok;
   }
@@ -644,7 +720,7 @@ export default function BoothPage() {
     submitResult("PENALTY", null, { down: down as 1 | 2 | 3 | 4, distance, fieldPosition: fp });
   }
 
-  if (!state) {
+  if (!state || awaitingSecondHalf) {
     return (
       <main className="flex flex-1 flex-col gap-8 p-5">
         <header className="flex items-center justify-between">
@@ -666,6 +742,11 @@ export default function BoothPage() {
           {!inProgressGame && (
             <p className="text-sm font-semibold uppercase tracking-widest text-slate-400">
               No active game — use Manage Game to start one
+            </p>
+          )}
+          {awaitingSecondHalf && (
+            <p className="text-sm font-semibold uppercase tracking-widest text-amber-400">
+              Halftime — start the second half
             </p>
           )}
           <ModeToggle mode={pendingMode} onChange={setPendingMode} disabled={disabled} />
@@ -754,6 +835,7 @@ export default function BoothPage() {
       )}
 
       <div className="flex items-center justify-between rounded-xl bg-slate-900 px-4 py-3 text-sm text-slate-300">
+        <span>{state.quarter}</span>
         <span>Drive {state.driveNumber}</span>
         <span>{formatDownDistance(state.mode, state.down, state.distance, state.fieldPosition)}</span>
         <span>{formatFieldPosition(state.fieldPosition)}</span>
@@ -995,7 +1077,32 @@ export default function BoothPage() {
               {RESULT_LABELS.SCORE}
             </button>
           </div>
+
+          {/* Separated from the play-result grid above (own container,
+              divider, distinct color) so it can't be mistaken for a play
+              result — ending a quarter isn't a play. */}
+          <div className="mt-4 border-t border-slate-800 pt-4">
+            <button
+              type="button"
+              onClick={() => setPendingResult("END_QUARTER")}
+              className="w-full rounded-xl border-2 border-amber-500 px-4 py-4 text-base font-bold text-amber-400 active:bg-amber-950/30"
+            >
+              End Quarter
+            </button>
+          </div>
         </Sheet>
+      )}
+
+      {sheet === "result" && pendingResult === "END_QUARTER" && (
+        <EndQuarterSheet
+          quarter={state.quarter}
+          onClose={() => setPendingResult(null)}
+          onConfirmAdvance={confirmEndQuarterAdvance}
+          onConfirmHalftime={confirmHalftime}
+          onStartOvertime={confirmStartOvertime}
+          onContinueOvertime={confirmContinueOvertime}
+          onEndGame={goToEndGameFromQuarter}
+        />
       )}
 
       {sheet === "result" && pendingResult === "SCORE" && (
@@ -1329,6 +1436,115 @@ function EndGameConfirmSheet({
           className="rounded-xl bg-red-600 px-4 py-4 text-lg font-bold text-white active:bg-red-700 disabled:opacity-50"
         >
           End Game
+        </button>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-xl bg-slate-800 px-4 py-4 text-lg font-semibold text-slate-300 active:bg-slate-700"
+        >
+          Cancel
+        </button>
+      </div>
+    </Sheet>
+  );
+}
+
+/**
+ * Confirmation for the End Quarter action — content depends on which
+ * quarter is ending (see plan section 3): Q1/Q3 just advance the tag, Q2 is
+ * halftime (hands off to the caller's kickoff-screen flow), Q4/OT offer a
+ * choice between ending the game and continuing play.
+ */
+function EndQuarterSheet({
+  quarter,
+  onClose,
+  onConfirmAdvance,
+  onConfirmHalftime,
+  onStartOvertime,
+  onContinueOvertime,
+  onEndGame,
+}: {
+  quarter: Quarter;
+  onClose: () => void;
+  onConfirmAdvance: (next: Quarter) => void;
+  onConfirmHalftime: () => void;
+  onStartOvertime: () => void;
+  onContinueOvertime: () => void;
+  onEndGame: () => void;
+}) {
+  if (quarter === "Q1" || quarter === "Q3") {
+    const next: Quarter = quarter === "Q1" ? "Q2" : "Q4";
+    return (
+      <Sheet title={`End ${quarter}?`} onClose={onClose}>
+        <div className="flex flex-col gap-4">
+          <p className="text-lg text-slate-200">
+            Plays will now be tagged <span className="font-bold">{next}</span>.
+          </p>
+          <button
+            type="button"
+            onClick={() => onConfirmAdvance(next)}
+            className="rounded-xl bg-amber-600 px-4 py-4 text-lg font-bold text-white active:bg-amber-700"
+          >
+            End {quarter}
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-xl bg-slate-800 px-4 py-4 text-lg font-semibold text-slate-300 active:bg-slate-700"
+          >
+            Cancel
+          </button>
+        </div>
+      </Sheet>
+    );
+  }
+
+  if (quarter === "Q2") {
+    return (
+      <Sheet title="End Q2 — Halftime?" onClose={onClose}>
+        <div className="flex flex-col gap-4">
+          <p className="text-lg text-slate-200">
+            Plays will now be tagged <span className="font-bold">Q3</span>. You&apos;ll be taken
+            to the second-half kickoff screen.
+          </p>
+          <button
+            type="button"
+            onClick={onConfirmHalftime}
+            className="rounded-xl bg-amber-600 px-4 py-4 text-lg font-bold text-white active:bg-amber-700"
+          >
+            End Q2 — Halftime
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-xl bg-slate-800 px-4 py-4 text-lg font-semibold text-slate-300 active:bg-slate-700"
+          >
+            Cancel
+          </button>
+        </div>
+      </Sheet>
+    );
+  }
+
+  // Q4 or OT — both end in a choice, never a bare quarter advance.
+  const title = quarter === "Q4" ? "End Q4?" : "End Overtime?";
+  return (
+    <Sheet title={title} onClose={onClose}>
+      <div className="flex flex-col gap-4">
+        <p className="text-lg text-slate-200">Choose how to proceed.</p>
+        <button
+          type="button"
+          onClick={onEndGame}
+          className="rounded-xl bg-red-600 px-4 py-4 text-lg font-bold text-white active:bg-red-700"
+        >
+          End Game
+        </button>
+        <button
+          type="button"
+          onClick={quarter === "Q4" ? onStartOvertime : onContinueOvertime}
+          className="rounded-xl bg-amber-600 px-4 py-4 text-lg font-bold text-white active:bg-amber-700"
+        >
+          {quarter === "Q4" ? "Start Overtime" : "Continue Overtime"}
         </button>
         <button
           type="button"

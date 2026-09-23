@@ -27,6 +27,7 @@ export type Flat = "SET" | "DEFENDER";
 export type Splits = "NONE" | "FLANKER_TIGHT" | "SLOT_TIGHT" | "BOTH_TIGHT";
 export type Formation = "OPEN" | "CLOSED";
 export type Hash = "L" | "M" | "R";
+export type Quarter = "Q1" | "Q2" | "Q3" | "Q4" | "OT";
 export type ThreeTech = "FIELD" | "BOUNDARY" | "HEADS_UP";
 export type ResultType =
   | "RUN"
@@ -67,6 +68,9 @@ export interface Play {
   formation: Formation | null;
   hash: Hash | null;
   three_tech: ThreeTech | null;
+  // Null only on rows predating this field (see migration 0011) — every
+  // row written by this app always has a real value.
+  quarter: Quarter | null;
   result_type: ResultType | null;
   result_yards: number | null;
   // Only set when result_type is 'SCORE' — which underlying play type the
@@ -109,6 +113,7 @@ export const DEFAULT_HASH: Hash = "M";
 // is a real assumed-correct default: the booth only taps when it's Boundary
 // or Heads-Up, same exception pattern as Personnel/Splits.
 export const DEFAULT_THREE_TECH: ThreeTech = "FIELD";
+export const DEFAULT_QUARTER: Quarter = "Q1";
 
 /** Human-readable "Own 25" / "Opp 40" for a 1-99 yards-to-goal value. */
 export function formatFieldPosition(fieldPosition: number): string {
