@@ -366,6 +366,7 @@ export default function BoothPage() {
   // FG distance or an INT/FR/KR return distance — never shown/used for a
   // Run/Pass TD, whose calculated yardage stays locked.
   const [editDistance, setEditDistance] = useState("");
+  const [editFgResult, setEditFgResult] = useState<FgResult>("GOOD");
   const [editPlayerNumber, setEditPlayerNumber] = useState("");
   const [editPlayerName, setEditPlayerName] = useState("");
   const [editPasserNumber, setEditPasserNumber] = useState("");
@@ -1266,6 +1267,7 @@ export default function BoothPage() {
     setEditTime(score.clock ? score.clock.replace(":", "") : "");
     setEditMethod(score.method === "PASS" ? "PASS" : "RUN");
     setEditDistance(score.distance_yards !== null ? String(score.distance_yards) : "");
+    setEditFgResult(score.fg_result ?? "GOOD");
     setEditPlayerNumber(score.player_number ?? "");
     setEditPlayerName(score.player_name ?? "");
     setEditPasserNumber(score.passer_number ?? "");
@@ -1307,6 +1309,10 @@ export default function BoothPage() {
     const showPasser = isTd && newMethod === "PASS";
     const passerNumber = showPasser ? editPasserNumber || null : null;
     const passerName = showPasser ? editPasserName || null : null;
+    // Doesn't affect possession, plays, or any other stat — safe to edit
+    // freely, unlike a TD's method (which the linked play must stay in
+    // sync with).
+    const fgResult = score.score_type === "FG" ? editFgResult : null;
 
     const conversionType = isTd ? editConversionType : null;
     const conversionApplies = conversionType === "PAT" || conversionType === "TWO_POINT";
@@ -1327,6 +1333,7 @@ export default function BoothPage() {
       playerName,
       passerNumber,
       passerName,
+      fgResult,
       conversionType,
       conversionMethod,
       conversionResult,
@@ -1344,6 +1351,7 @@ export default function BoothPage() {
       player_name: playerName,
       passer_number: passerNumber,
       passer_name: passerName,
+      fg_result: fgResult,
       conversion_type: conversionType,
       conversion_method: conversionMethod,
       conversion_result: conversionResult,
@@ -1402,6 +1410,8 @@ export default function BoothPage() {
       setMethod={setEditMethod}
       distance={editDistance}
       setDistance={setEditDistance}
+      fgResult={editFgResult}
+      setFgResult={setEditFgResult}
       playerNumber={editPlayerNumber}
       setPlayerNumber={setEditPlayerNumber}
       playerName={editPlayerName}
@@ -2395,6 +2405,8 @@ function EditScoringOverlay({
   setMethod,
   distance,
   setDistance,
+  fgResult,
+  setFgResult,
   playerNumber,
   setPlayerNumber,
   playerName,
@@ -2433,6 +2445,8 @@ function EditScoringOverlay({
   setMethod: (v: "RUN" | "PASS") => void;
   distance: string;
   setDistance: (v: string) => void;
+  fgResult: FgResult;
+  setFgResult: (v: FgResult) => void;
   playerNumber: string;
   setPlayerNumber: (v: string) => void;
   playerName: string;
@@ -2482,6 +2496,8 @@ function EditScoringOverlay({
             setMethod={setMethod}
             distance={distance}
             setDistance={setDistance}
+            fgResult={fgResult}
+            setFgResult={setFgResult}
             playerNumber={playerNumber}
             setPlayerNumber={setPlayerNumber}
             playerName={playerName}
@@ -2588,6 +2604,8 @@ function EditScoreForm({
   setMethod,
   distance,
   setDistance,
+  fgResult,
+  setFgResult,
   playerNumber,
   setPlayerNumber,
   playerName,
@@ -2620,6 +2638,8 @@ function EditScoreForm({
   setMethod: (v: "RUN" | "PASS") => void;
   distance: string;
   setDistance: (v: string) => void;
+  fgResult: FgResult;
+  setFgResult: (v: FgResult) => void;
   playerNumber: string;
   setPlayerNumber: (v: string) => void;
   playerName: string;
@@ -2696,6 +2716,19 @@ function EditScoreForm({
           label={score.score_type === "FG" ? "Distance (yards)" : "Return Distance (optional)"}
           value={distance}
           onChange={setDistance}
+        />
+      )}
+
+      {score.score_type === "FG" && (
+        <ToggleRow
+          label="Result"
+          value={fgResult}
+          disabled={false}
+          onSelect={setFgResult}
+          options={[
+            { value: "GOOD", text: "Good", clean: true },
+            { value: "NO_GOOD", text: "No Good", clean: false },
+          ]}
         />
       )}
 

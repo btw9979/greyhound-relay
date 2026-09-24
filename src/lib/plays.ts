@@ -463,6 +463,7 @@ export interface ScoreEdit {
   playerName: string | null;
   passerNumber: string | null;
   passerName: string | null;
+  fgResult: FgResult | null;
   conversionType: ConversionType | null;
   conversionMethod: ConversionMethod | null;
   conversionResult: ConversionResult | null;
@@ -494,6 +495,7 @@ export async function updateScore(
       player_name: edit.playerName,
       passer_number: edit.passerNumber,
       passer_name: edit.passerName,
+      fg_result: edit.fgResult,
       conversion_type: edit.conversionType,
       conversion_method: edit.conversionMethod,
       conversion_result: edit.conversionResult,
