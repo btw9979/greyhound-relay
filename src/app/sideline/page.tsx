@@ -8,12 +8,14 @@ import {
   formatDownDistance,
   formatFieldPosition,
   computeGameStats,
+  getGameScores,
   normalizePlayFromDb,
   updateFinalScore,
 } from "@/lib/plays";
-import type { Game, Play, GameStats, PlayLogRow } from "@/lib/plays";
+import type { Game, Play, GameStats, PlayLogRow, Score } from "@/lib/plays";
 import { SwitchRole } from "@/components/SwitchRole";
 import { StatBreakdown } from "@/components/StatBreakdown";
+import { ScoringSummary } from "@/components/ScoringSummary";
 import { useWakeLock } from "@/lib/useWakeLock";
 import { useOrientationLock } from "@/lib/useOrientationLock";
 
@@ -215,9 +217,12 @@ export default function SidelinePage() {
   const currentPlay = play && game && play.game_id === game.id ? play : null;
   const displayLastUpdate = currentPlay ? lastUpdate : null;
 
-  // Fetched once a game is marked complete: the full play log, reduced to
-  // Offense/Defense stat tables for the EoG summary.
-  const [summary, setSummary] = useState<{ gameId: string; stats: GameStats } | null>(null);
+  // Fetched once a game is marked complete: the full play log reduced to
+  // Offense/Defense stat tables, plus every score record, for the EoG
+  // summary.
+  const [summary, setSummary] = useState<{ gameId: string; stats: GameStats; scores: Score[] } | null>(
+    null,
+  );
 
   useEffect(() => {
     if (!game || game.status !== "complete") return;
@@ -226,16 +231,20 @@ export default function SidelinePage() {
     (async () => {
       // computeGameStats needs chronological order — 3rd Down Conversions
       // depends on play sequence, not just independent per-row totals.
-      const { data } = await supabase
-        .from("plays")
-        .select("mode, down, result_type, result_yards, score_play_type")
-        .eq("game_id", game.id)
-        .order("created_at", { ascending: true });
+      const [{ data }, scores] = await Promise.all([
+        supabase
+          .from("plays")
+          .select("mode, down, result_type, result_yards, score_play_type")
+          .eq("game_id", game.id)
+          .order("created_at", { ascending: true }),
+        getGameScores(supabase, game.id),
+      ]);
 
       if (cancelled || !data) return;
       setSummary({
         gameId: game.id,
         stats: computeGameStats(data as PlayLogRow[]),
+        scores,
       });
     })();
 
@@ -246,6 +255,8 @@ export default function SidelinePage() {
 
   const currentStats =
     game && game.status === "complete" && summary?.gameId === game.id ? summary.stats : null;
+  const currentScores =
+    game && game.status === "complete" && summary?.gameId === game.id ? summary.scores : [];
 
   async function handleSaveFinalScore(us: number, opponent: number) {
     if (!game) return;
@@ -298,6 +309,7 @@ export default function SidelinePage() {
         <GameSummary
           game={game}
           stats={currentStats}
+          scores={currentScores}
           onSaveFinalScore={handleSaveFinalScore}
           onLogout={handleLogout}
         />
@@ -412,11 +424,13 @@ export default function SidelinePage() {
 function GameSummary({
   game,
   stats,
+  scores,
   onSaveFinalScore,
   onLogout,
 }: {
   game: Game;
   stats: GameStats | null;
+  scores: Score[];
   onSaveFinalScore: (us: number, opponent: number) => Promise<void>;
   onLogout: () => void;
 }) {
@@ -430,6 +444,8 @@ function GameSummary({
       />
 
       <StatBreakdown stats={stats} />
+
+      <ScoringSummary scores={scores} />
 
       <button
         type="button"

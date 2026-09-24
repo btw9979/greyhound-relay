@@ -443,6 +443,91 @@ export async function updateScoreConversion(
   if (error) throw error;
 }
 
+/** All score records for a game, in logged order — the order the running score and scoring summary use. */
+export async function getGameScores(supabase: SupabaseClient, gameId: string): Promise<Score[]> {
+  const { data, error } = await supabase
+    .from("scores")
+    .select("*")
+    .eq("game_id", gameId)
+    .order("created_at", { ascending: true });
+
+  if (error) throw error;
+  return (data ?? []) as Score[];
+}
+
+export interface ScoreEdit {
+  clock: string | null;
+  method: ScoreMethod | null;
+  distanceYards: number | null;
+  playerNumber: string | null;
+  playerName: string | null;
+  passerNumber: string | null;
+  passerName: string | null;
+  conversionType: ConversionType | null;
+  conversionMethod: ConversionMethod | null;
+  conversionResult: ConversionResult | null;
+  conversionPlayerNumber: string | null;
+  conversionPlayerName: string | null;
+  conversionPasserNumber: string | null;
+  conversionPasserName: string | null;
+}
+
+/**
+ * Booth-only: applies an edit to an existing score record — see Edit
+ * Scoring. The caller is responsible for keeping fields consistent with
+ * `scores_type_fields_check` (e.g. passing nulls for TD-only fields on an
+ * FG/SAFETY record) and, if `method` changed on a Run/Pass TD, for also
+ * calling `correctTdPlayType` — this function only ever touches `scores`.
+ */
+export async function updateScore(
+  supabase: SupabaseClient,
+  scoreId: string,
+  edit: ScoreEdit,
+): Promise<void> {
+  const { error } = await supabase
+    .from("scores")
+    .update({
+      clock: edit.clock,
+      method: edit.method,
+      distance_yards: edit.distanceYards,
+      player_number: edit.playerNumber,
+      player_name: edit.playerName,
+      passer_number: edit.passerNumber,
+      passer_name: edit.passerName,
+      conversion_type: edit.conversionType,
+      conversion_method: edit.conversionMethod,
+      conversion_result: edit.conversionResult,
+      conversion_player_number: edit.conversionPlayerNumber,
+      conversion_player_name: edit.conversionPlayerName,
+      conversion_passer_number: edit.conversionPasserNumber,
+      conversion_passer_name: edit.conversionPasserName,
+    })
+    .eq("id", scoreId);
+
+  if (error) throw error;
+}
+
+/**
+ * Booth-only, narrowly-scoped correction (migration 0013): fixes a Run/Pass
+ * TD's underlying play row when film shows it was logged as the wrong
+ * type — result_type stays 'SCORE' (that's what drives the mode-flip/new-
+ * drive behavior and must never change), only score_play_type flips. The
+ * grant backing this only permits that one column, on rows that are
+ * already a Run/Pass TD, so this can't be used to edit anything else.
+ */
+export async function correctTdPlayType(
+  supabase: SupabaseClient,
+  playId: string,
+  scorePlayType: ScorePlayType,
+): Promise<void> {
+  const { error } = await supabase
+    .from("plays")
+    .update({ score_play_type: scorePlayType })
+    .eq("id", playId);
+
+  if (error) throw error;
+}
+
 /** Formats raw typed digits ("127") as mm:ss ("1:27") — see the Score flow's Time field. */
 export function formatClockDigits(digits: string): string {
   const seconds = digits.slice(-2).padStart(2, "0");

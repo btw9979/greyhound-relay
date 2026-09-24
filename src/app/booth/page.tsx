@@ -8,14 +8,17 @@ import {
   attackingFieldPosition,
   clockValueForSubmit,
   computeGameStats,
+  correctTdPlayType,
   endGame,
   formatClockDigits,
   formatDownDistance,
   formatFieldPosition,
   getCurrentGame,
+  getGameScores,
   insertScore,
   normalizePlayFromDb,
   startNewGame,
+  updateScore,
   updateScoreConversion,
   DEFAULT_DISTANCE,
   DEFAULT_DOWN,
@@ -30,6 +33,7 @@ import {
 import type {
   ConversionMethod,
   ConversionResult,
+  ConversionType,
   Down,
   FgResult,
   Flat,
@@ -44,7 +48,9 @@ import type {
   PlayLogRow,
   Quarter,
   ResultType,
+  Score,
   ScoreConversion,
+  ScoreEdit,
   ScoreMethod,
   ScorePlayType,
   ScoringTeam,
@@ -55,6 +61,8 @@ import { SwitchRole } from "@/components/SwitchRole";
 import { Sheet } from "@/components/Sheet";
 import { ExceptionToggle } from "@/components/ExceptionToggle";
 import { StatBreakdown } from "@/components/StatBreakdown";
+import { ScoringSummary } from "@/components/ScoringSummary";
+import { describeScore, formatScoreLine1, runningScoreEntries } from "@/lib/scoring";
 
 type TapStatus = "idle" | "sending" | "sent" | "error";
 
@@ -210,6 +218,12 @@ export default function BoothPage() {
   const router = useRouter();
   const [supabase] = useState(() => createClient());
   const [game, setGame] = useState<Game | null>(null);
+  // Whether the current game has any score records — gates the Manage Game
+  // menu's Edit Scoring entry. Set from an initial-load check, then kept
+  // current locally (flipped true right after any successful score
+  // creation, reset on a new game) rather than re-fetched every time the
+  // menu opens.
+  const [hasScores, setHasScores] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
@@ -274,6 +288,7 @@ export default function BoothPage() {
   // or any play-logging state.
   const [liveStatsOpen, setLiveStatsOpen] = useState(false);
   const [liveStats, setLiveStats] = useState<GameStats | null>(null);
+  const [liveScores, setLiveScores] = useState<Score[]>([]);
   const [liveStatsLoading, setLiveStatsLoading] = useState(false);
 
   const [pendingResult, setPendingResult] = useState<ResultType | "END_QUARTER" | null>(null);
@@ -334,6 +349,35 @@ export default function BoothPage() {
 
   const [krTeam, setKrTeam] = useState<ScoringTeam>("us");
 
+  // Edit Scoring (section 4) — a full-screen list of every score record
+  // (including missed FGs, unlike the read-only ScoringSummary), tap one
+  // to open its edit form. `editingScore` null means the list is showing;
+  // set means the form for that one record is.
+  const [editScoringOpen, setEditScoringOpen] = useState(false);
+  const [editScoringScores, setEditScoringScores] = useState<Score[]>([]);
+  const [editScoringLoading, setEditScoringLoading] = useState(false);
+  const [editingScore, setEditingScore] = useState<Score | null>(null);
+  const [editSaving, setEditSaving] = useState(false);
+
+  const [editTime, setEditTime] = useState("");
+  // Only meaningful when editingScore.method is RUN or PASS — the only TD
+  // methods the plan allows correcting.
+  const [editMethod, setEditMethod] = useState<"RUN" | "PASS">("RUN");
+  // FG distance or an INT/FR/KR return distance — never shown/used for a
+  // Run/Pass TD, whose calculated yardage stays locked.
+  const [editDistance, setEditDistance] = useState("");
+  const [editPlayerNumber, setEditPlayerNumber] = useState("");
+  const [editPlayerName, setEditPlayerName] = useState("");
+  const [editPasserNumber, setEditPasserNumber] = useState("");
+  const [editPasserName, setEditPasserName] = useState("");
+  const [editConversionType, setEditConversionType] = useState<ConversionType>("NONE");
+  const [editConversionMethod, setEditConversionMethod] = useState<ConversionMethod>("RUN");
+  const [editConversionResult, setEditConversionResult] = useState<ConversionResult>("GOOD");
+  const [editConversionPlayerNumber, setEditConversionPlayerNumber] = useState("");
+  const [editConversionPlayerName, setEditConversionPlayerName] = useState("");
+  const [editConversionPasserNumber, setEditConversionPasserNumber] = useState("");
+  const [editConversionPasserName, setEditConversionPasserName] = useState("");
+
   useEffect(() => {
     let cancelled = false;
 
@@ -384,6 +428,14 @@ export default function BoothPage() {
             quarter: p.quarter ?? DEFAULT_QUARTER,
           });
         }
+
+        const { data: existingScore } = await supabase
+          .from("scores")
+          .select("id")
+          .eq("game_id", currentGame.id)
+          .limit(1)
+          .maybeSingle();
+        if (!cancelled) setHasScores(!!existingScore);
       } catch {
         if (!cancelled) {
           setInitError("Couldn't reach the server. Check connection and reload.");
@@ -475,6 +527,7 @@ export default function BoothPage() {
       setGame(newGame);
       setState(null);
       setAwaitingSecondHalf(false);
+      setHasScores(false);
       setPendingMode(startingMode);
       resetDriveFlow();
       setSheet(null);
@@ -484,9 +537,24 @@ export default function BoothPage() {
     }
   }
 
-  function openEndGameConfirm() {
+  // Prefills from score records so the final-score prompt is a quick check
+  // (does it match the scoreboard?) rather than manual entry from scratch.
+  // Both fields stay editable, and whatever's actually submitted is what's
+  // stored — this is just a starting point.
+  async function openEndGameConfirm() {
     setEndGameScoreUs("");
     setEndGameScoreOpponent("");
+    if (game) {
+      try {
+        const scores = await getGameScores(supabase, game.id);
+        const entries = runningScoreEntries(scores);
+        const last = entries[entries.length - 1];
+        setEndGameScoreUs(String(last?.usTotal ?? 0));
+        setEndGameScoreOpponent(String(last?.opponentTotal ?? 0));
+      } catch {
+        // Fall back to blank fields — still enterable by hand.
+      }
+    }
     setSheet("endGameConfirm");
   }
 
@@ -517,12 +585,16 @@ export default function BoothPage() {
     if (!game) return;
     setLiveStatsOpen(true);
     setLiveStatsLoading(true);
-    const { data } = await supabase
-      .from("plays")
-      .select("mode, down, result_type, result_yards, score_play_type")
-      .eq("game_id", game.id)
-      .order("created_at", { ascending: true });
+    const [{ data }, scores] = await Promise.all([
+      supabase
+        .from("plays")
+        .select("mode, down, result_type, result_yards, score_play_type")
+        .eq("game_id", game.id)
+        .order("created_at", { ascending: true }),
+      getGameScores(supabase, game.id),
+    ]);
     setLiveStats(data ? computeGameStats(data as PlayLogRow[]) : null);
+    setLiveScores(scores);
     setLiveStatsLoading(false);
   }
 
@@ -950,6 +1022,7 @@ export default function BoothPage() {
         passerName: pendingTd.method === "PASS" ? tdPasserName || null : null,
       });
       setPendingScoreId(score.id);
+      setHasScores(true);
       setConversionMethod("RUN");
       setConversionPlayerNumber("");
       setConversionPlayerName("");
@@ -1023,6 +1096,7 @@ export default function BoothPage() {
         playerName: fgKickerName || null,
         fgResult,
       });
+      setHasScores(true);
     } catch {
       setInitError("Couldn't save the score. Check connection and try again.");
     }
@@ -1086,6 +1160,7 @@ export default function BoothPage() {
         playerNumber: safetyTacklerNumber || null,
         playerName: safetyTacklerName || null,
       });
+      setHasScores(true);
     } catch {
       setInitError("Couldn't save the score. Check connection and try again.");
     }
@@ -1174,6 +1249,184 @@ export default function BoothPage() {
     });
   }
 
+  // ---- Edit Scoring (section 4) ----
+
+  async function openEditScoring() {
+    if (!game) return;
+    setEditScoringOpen(true);
+    setEditingScore(null);
+    setEditScoringLoading(true);
+    const scores = await getGameScores(supabase, game.id);
+    setEditScoringScores(scores);
+    setEditScoringLoading(false);
+  }
+
+  function openEditScoreForm(score: Score) {
+    setEditingScore(score);
+    setEditTime(score.clock ? score.clock.replace(":", "") : "");
+    setEditMethod(score.method === "PASS" ? "PASS" : "RUN");
+    setEditDistance(score.distance_yards !== null ? String(score.distance_yards) : "");
+    setEditPlayerNumber(score.player_number ?? "");
+    setEditPlayerName(score.player_name ?? "");
+    setEditPasserNumber(score.passer_number ?? "");
+    setEditPasserName(score.passer_name ?? "");
+    setEditConversionType(score.conversion_type ?? "NONE");
+    setEditConversionMethod(score.conversion_method ?? "RUN");
+    setEditConversionResult(score.conversion_result ?? "GOOD");
+    setEditConversionPlayerNumber(score.conversion_player_number ?? "");
+    setEditConversionPlayerName(score.conversion_player_name ?? "");
+    setEditConversionPasserNumber(score.conversion_passer_number ?? "");
+    setEditConversionPasserName(score.conversion_passer_name ?? "");
+  }
+
+  // Builds both the DB patch and the equivalent locally-updated Score from
+  // the current edit-form fields, applying the same locked/shown rules the
+  // form itself enforces (TD method only for Run/Pass, its yardage always
+  // locked, conversion fields only for a TD, passer only for a pass).
+  function buildScoreEditPatch(score: Score): {
+    dbEdit: ScoreEdit;
+    updated: Score;
+    methodChanged: boolean;
+    newScorePlayType: ScorePlayType | null;
+  } {
+    const isTd = score.score_type === "TD";
+    const methodEditable = isTd && (score.method === "RUN" || score.method === "PASS");
+    const newMethod: ScoreMethod | null = methodEditable ? editMethod : score.method;
+    // The scoring play's own distance is a calculated fact of where the
+    // play started, unaffected by a Run<->Pass correction — stays locked
+    // whenever the TD method was (originally) Run or Pass. Only an
+    // INT/FR/KR return distance or an FG distance is actually editable.
+    const distanceYards = methodEditable
+      ? score.distance_yards
+      : editDistance === ""
+        ? null
+        : Number(editDistance);
+    const clock = clockValueForSubmit(editTime);
+    const playerNumber = editPlayerNumber || null;
+    const playerName = editPlayerName || null;
+    const showPasser = isTd && newMethod === "PASS";
+    const passerNumber = showPasser ? editPasserNumber || null : null;
+    const passerName = showPasser ? editPasserName || null : null;
+
+    const conversionType = isTd ? editConversionType : null;
+    const conversionApplies = conversionType === "PAT" || conversionType === "TWO_POINT";
+    const isTwoPoint = conversionType === "TWO_POINT";
+    const conversionMethod = isTwoPoint ? editConversionMethod : null;
+    const conversionResult = conversionApplies ? editConversionResult : null;
+    const conversionPlayerNumber = conversionApplies ? editConversionPlayerNumber || null : null;
+    const conversionPlayerName = conversionApplies ? editConversionPlayerName || null : null;
+    const showConversionPasser = isTwoPoint && conversionMethod === "PASS";
+    const conversionPasserNumber = showConversionPasser ? editConversionPasserNumber || null : null;
+    const conversionPasserName = showConversionPasser ? editConversionPasserName || null : null;
+
+    const dbEdit: ScoreEdit = {
+      clock,
+      method: newMethod,
+      distanceYards,
+      playerNumber,
+      playerName,
+      passerNumber,
+      passerName,
+      conversionType,
+      conversionMethod,
+      conversionResult,
+      conversionPlayerNumber,
+      conversionPlayerName,
+      conversionPasserNumber,
+      conversionPasserName,
+    };
+    const updated: Score = {
+      ...score,
+      clock,
+      method: newMethod,
+      distance_yards: distanceYards,
+      player_number: playerNumber,
+      player_name: playerName,
+      passer_number: passerNumber,
+      passer_name: passerName,
+      conversion_type: conversionType,
+      conversion_method: conversionMethod,
+      conversion_result: conversionResult,
+      conversion_player_number: conversionPlayerNumber,
+      conversion_player_name: conversionPlayerName,
+      conversion_passer_number: conversionPasserNumber,
+      conversion_passer_name: conversionPasserName,
+    };
+    const methodChanged = methodEditable && newMethod !== score.method;
+    const newScorePlayType: ScorePlayType | null = methodChanged
+      ? newMethod === "PASS"
+        ? "PASS_COMPLETE"
+        : "RUN"
+      : null;
+    return { dbEdit, updated, methodChanged, newScorePlayType };
+  }
+
+  async function saveScoreEdit() {
+    if (!editingScore) return;
+    setEditSaving(true);
+    const score = editingScore;
+    const { dbEdit, updated, methodChanged, newScorePlayType } = buildScoreEditPatch(score);
+    try {
+      await updateScore(supabase, score.id, dbEdit);
+      // A Run<->Pass correction is the one narrow exception to plays being
+      // append-only (migration 0013) — only ever touches score_play_type,
+      // and only for a play already linked to this TD.
+      if (methodChanged && newScorePlayType && score.play_id) {
+        await correctTdPlayType(supabase, score.play_id, newScorePlayType);
+      }
+      setEditScoringScores((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
+      setEditingScore(null);
+    } catch {
+      setInitError("Couldn't save the edit. Check connection and try again.");
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
+  // Computed once and reused at both render-branch insertion points below,
+  // rather than repeating this large a prop list twice.
+  const editScoringOverlay = editScoringOpen && (
+    <EditScoringOverlay
+      game={game}
+      scores={editScoringScores}
+      loading={editScoringLoading}
+      editingScore={editingScore}
+      saving={editSaving}
+      onClose={() => setEditScoringOpen(false)}
+      onSelectScore={openEditScoreForm}
+      onBackToList={() => setEditingScore(null)}
+      onSave={saveScoreEdit}
+      time={editTime}
+      setTime={setEditTime}
+      method={editMethod}
+      setMethod={setEditMethod}
+      distance={editDistance}
+      setDistance={setEditDistance}
+      playerNumber={editPlayerNumber}
+      setPlayerNumber={setEditPlayerNumber}
+      playerName={editPlayerName}
+      setPlayerName={setEditPlayerName}
+      passerNumber={editPasserNumber}
+      setPasserNumber={setEditPasserNumber}
+      passerName={editPasserName}
+      setPasserName={setEditPasserName}
+      conversionType={editConversionType}
+      setConversionType={setEditConversionType}
+      conversionMethod={editConversionMethod}
+      setConversionMethod={setEditConversionMethod}
+      conversionResult={editConversionResult}
+      setConversionResult={setEditConversionResult}
+      conversionPlayerNumber={editConversionPlayerNumber}
+      setConversionPlayerNumber={setEditConversionPlayerNumber}
+      conversionPlayerName={editConversionPlayerName}
+      setConversionPlayerName={setEditConversionPlayerName}
+      conversionPasserNumber={editConversionPasserNumber}
+      setConversionPasserNumber={setEditConversionPasserNumber}
+      conversionPasserName={editConversionPasserName}
+      setConversionPasserName={setEditConversionPasserName}
+    />
+  );
+
   if (!state || awaitingSecondHalf) {
     return (
       <main className="flex flex-1 flex-col gap-8 p-5">
@@ -1226,9 +1479,11 @@ export default function BoothPage() {
         {sheet === "manageGame" && (
           <ManageGameSheet
             inProgress={!!inProgressGame}
+            canEditScoring={hasScores}
             onClose={() => setSheet(null)}
             onNewGame={openGameSetup}
             onEndGame={openEndGameConfirm}
+            onEditScoring={openEditScoring}
             onLogout={handleLogout}
           />
         )}
@@ -1262,10 +1517,13 @@ export default function BoothPage() {
         {liveStatsOpen && (
           <LiveStatsOverlay
             stats={liveStats}
+            scores={liveScores}
             loading={liveStatsLoading}
             onClose={() => setLiveStatsOpen(false)}
           />
         )}
+
+        {editScoringOverlay}
       </main>
     );
   }
@@ -1456,9 +1714,11 @@ export default function BoothPage() {
       {sheet === "manageGame" && (
         <ManageGameSheet
           inProgress={!!inProgressGame}
+          canEditScoring={hasScores}
           onClose={() => setSheet(null)}
           onNewGame={openGameSetup}
           onEndGame={openEndGameConfirm}
+          onEditScoring={openEditScoring}
           onLogout={handleLogout}
         />
       )}
@@ -2043,10 +2303,13 @@ export default function BoothPage() {
       {liveStatsOpen && (
         <LiveStatsOverlay
           stats={liveStats}
+          scores={liveScores}
           loading={liveStatsLoading}
           onClose={() => setLiveStatsOpen(false)}
         />
       )}
+
+      {editScoringOverlay}
     </main>
   );
 }
@@ -2074,10 +2337,12 @@ function LiveStatsButton({ onClick, disabled }: { onClick: () => void; disabled:
  */
 function LiveStatsOverlay({
   stats,
+  scores,
   loading,
   onClose,
 }: {
   stats: GameStats | null;
+  scores: Score[];
   loading: boolean;
   onClose: () => void;
 }) {
@@ -2099,9 +2364,458 @@ function LiveStatsOverlay({
         ) : (
           <div className="flex flex-col items-center gap-6 pb-8">
             <StatBreakdown stats={stats} />
+            <ScoringSummary scores={scores} />
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Edit Scoring (section 4) — a full-screen overlay showing either the list
+ * of every score record (editingScore null) or the edit form for one
+ * (editingScore set). Cancel/Back from the form discards changes without
+ * prompting — see EditScoreForm — by simply not saving; the list only ever
+ * reflects what was actually written.
+ */
+function EditScoringOverlay({
+  game,
+  scores,
+  loading,
+  editingScore,
+  saving,
+  onClose,
+  onSelectScore,
+  onBackToList,
+  onSave,
+  time,
+  setTime,
+  method,
+  setMethod,
+  distance,
+  setDistance,
+  playerNumber,
+  setPlayerNumber,
+  playerName,
+  setPlayerName,
+  passerNumber,
+  setPasserNumber,
+  passerName,
+  setPasserName,
+  conversionType,
+  setConversionType,
+  conversionMethod,
+  setConversionMethod,
+  conversionResult,
+  setConversionResult,
+  conversionPlayerNumber,
+  setConversionPlayerNumber,
+  conversionPlayerName,
+  setConversionPlayerName,
+  conversionPasserNumber,
+  setConversionPasserNumber,
+  conversionPasserName,
+  setConversionPasserName,
+}: {
+  game: Game | null;
+  scores: Score[];
+  loading: boolean;
+  editingScore: Score | null;
+  saving: boolean;
+  onClose: () => void;
+  onSelectScore: (score: Score) => void;
+  onBackToList: () => void;
+  onSave: () => void;
+  time: string;
+  setTime: (v: string) => void;
+  method: "RUN" | "PASS";
+  setMethod: (v: "RUN" | "PASS") => void;
+  distance: string;
+  setDistance: (v: string) => void;
+  playerNumber: string;
+  setPlayerNumber: (v: string) => void;
+  playerName: string;
+  setPlayerName: (v: string) => void;
+  passerNumber: string;
+  setPasserNumber: (v: string) => void;
+  passerName: string;
+  setPasserName: (v: string) => void;
+  conversionType: ConversionType;
+  setConversionType: (v: ConversionType) => void;
+  conversionMethod: ConversionMethod;
+  setConversionMethod: (v: ConversionMethod) => void;
+  conversionResult: ConversionResult;
+  setConversionResult: (v: ConversionResult) => void;
+  conversionPlayerNumber: string;
+  setConversionPlayerNumber: (v: string) => void;
+  conversionPlayerName: string;
+  setConversionPlayerName: (v: string) => void;
+  conversionPasserNumber: string;
+  setConversionPasserNumber: (v: string) => void;
+  conversionPasserName: string;
+  setConversionPasserName: (v: string) => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-30 flex flex-col bg-slate-950">
+      <header className="flex flex-none items-center justify-between border-b border-slate-800 px-5 py-4">
+        <h2 className="text-lg font-bold text-slate-50">{editingScore ? "Edit Score" : "Edit Scoring"}</h2>
+        <button
+          type="button"
+          onClick={editingScore ? onBackToList : onClose}
+          className="rounded-full bg-slate-800 px-4 py-2 text-sm font-semibold text-slate-300 active:bg-slate-700"
+        >
+          {editingScore ? "Cancel" : "Close"}
+        </button>
+      </header>
+      <div className="flex flex-1 flex-col items-center overflow-y-auto p-5">
+        {loading ? (
+          <p className="text-center text-sm text-slate-400">Loading…</p>
+        ) : editingScore ? (
+          <EditScoreForm
+            score={editingScore}
+            saving={saving}
+            onSave={onSave}
+            time={time}
+            setTime={setTime}
+            method={method}
+            setMethod={setMethod}
+            distance={distance}
+            setDistance={setDistance}
+            playerNumber={playerNumber}
+            setPlayerNumber={setPlayerNumber}
+            playerName={playerName}
+            setPlayerName={setPlayerName}
+            passerNumber={passerNumber}
+            setPasserNumber={setPasserNumber}
+            passerName={passerName}
+            setPasserName={setPasserName}
+            conversionType={conversionType}
+            setConversionType={setConversionType}
+            conversionMethod={conversionMethod}
+            setConversionMethod={setConversionMethod}
+            conversionResult={conversionResult}
+            setConversionResult={setConversionResult}
+            conversionPlayerNumber={conversionPlayerNumber}
+            setConversionPlayerNumber={setConversionPlayerNumber}
+            conversionPlayerName={conversionPlayerName}
+            setConversionPlayerName={setConversionPlayerName}
+            conversionPasserNumber={conversionPasserNumber}
+            setConversionPasserNumber={setConversionPasserNumber}
+            conversionPasserName={conversionPasserName}
+            setConversionPasserName={setConversionPasserName}
+          />
+        ) : (
+          <EditScoringList game={game} scores={scores} onSelect={onSelectScore} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Every score record for the game, including a missed FG (labeled "No
+ * Good" by describeScore) — unlike the read-only ScoringSummary, which
+ * excludes it. The mismatch note (Booth-only, section 6) compares the
+ * stored final score against the calculated total from these same
+ * records; it only shows once a final score has actually been entered.
+ */
+function EditScoringList({
+  game,
+  scores,
+  onSelect,
+}: {
+  game: Game | null;
+  scores: Score[];
+  onSelect: (score: Score) => void;
+}) {
+  const entries = runningScoreEntries(scores);
+  const last = entries[entries.length - 1];
+  const calcUs = last?.usTotal ?? 0;
+  const calcOpponent = last?.opponentTotal ?? 0;
+  const finalUs = game?.final_score_us ?? null;
+  const finalOpponent = game?.final_score_opponent ?? null;
+  const mismatch =
+    finalUs !== null && finalOpponent !== null && (finalUs !== calcUs || finalOpponent !== calcOpponent);
+
+  return (
+    <div className="flex w-full max-w-md flex-col items-center gap-4 pb-8">
+      {mismatch && (
+        <p className="w-full rounded-xl border border-amber-700 bg-amber-950/40 px-4 py-3 text-center text-sm text-amber-300">
+          Final score {finalUs}-{finalOpponent} differs from recorded scoring ({calcUs}-{calcOpponent}). Some
+          scores may be missing.
+        </p>
+      )}
+      {entries.length === 0 ? (
+        <p className="text-sm text-slate-500">No scores logged yet.</p>
+      ) : (
+        <ul className="flex w-full flex-col gap-3">
+          {entries.map(({ score, ...entry }) => (
+            <li key={score.id}>
+              <button
+                type="button"
+                onClick={() => onSelect(score)}
+                className="w-full rounded-xl bg-slate-900 px-4 py-3 text-left active:bg-slate-800"
+              >
+                <p className="text-xs font-bold uppercase tracking-widest text-slate-400">
+                  {formatScoreLine1({ score, ...entry })}
+                </p>
+                <p className="text-sm font-semibold text-slate-100">{describeScore(score)}</p>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Edit form for one score record — every field optional, all shown at
+ * once (not a wizard, unlike creation). Method is only editable between
+ * Run and Pass, and only when it already was one of those (INT/FR/KR
+ * involve different possession/play records — see the plan). A Run/Pass
+ * TD's own scoring-play distance stays locked regardless: it's a fact of
+ * where the play started, unaffected by which way it's credited.
+ */
+function EditScoreForm({
+  score,
+  saving,
+  onSave,
+  time,
+  setTime,
+  method,
+  setMethod,
+  distance,
+  setDistance,
+  playerNumber,
+  setPlayerNumber,
+  playerName,
+  setPlayerName,
+  passerNumber,
+  setPasserNumber,
+  passerName,
+  setPasserName,
+  conversionType,
+  setConversionType,
+  conversionMethod,
+  setConversionMethod,
+  conversionResult,
+  setConversionResult,
+  conversionPlayerNumber,
+  setConversionPlayerNumber,
+  conversionPlayerName,
+  setConversionPlayerName,
+  conversionPasserNumber,
+  setConversionPasserNumber,
+  conversionPasserName,
+  setConversionPasserName,
+}: {
+  score: Score;
+  saving: boolean;
+  onSave: () => void;
+  time: string;
+  setTime: (v: string) => void;
+  method: "RUN" | "PASS";
+  setMethod: (v: "RUN" | "PASS") => void;
+  distance: string;
+  setDistance: (v: string) => void;
+  playerNumber: string;
+  setPlayerNumber: (v: string) => void;
+  playerName: string;
+  setPlayerName: (v: string) => void;
+  passerNumber: string;
+  setPasserNumber: (v: string) => void;
+  passerName: string;
+  setPasserName: (v: string) => void;
+  conversionType: ConversionType;
+  setConversionType: (v: ConversionType) => void;
+  conversionMethod: ConversionMethod;
+  setConversionMethod: (v: ConversionMethod) => void;
+  conversionResult: ConversionResult;
+  setConversionResult: (v: ConversionResult) => void;
+  conversionPlayerNumber: string;
+  setConversionPlayerNumber: (v: string) => void;
+  conversionPlayerName: string;
+  setConversionPlayerName: (v: string) => void;
+  conversionPasserNumber: string;
+  setConversionPasserNumber: (v: string) => void;
+  conversionPasserName: string;
+  setConversionPasserName: (v: string) => void;
+}) {
+  const isTd = score.score_type === "TD";
+  const methodEditable = isTd && (score.method === "RUN" || score.method === "PASS");
+  const isReturn = isTd && (score.method === "INT" || score.method === "FR" || score.method === "KR");
+  const playerLabel =
+    score.score_type === "FG"
+      ? "Kicker"
+      : score.score_type === "SAFETY"
+        ? "Tackler"
+        : method === "PASS"
+          ? "Receiver"
+          : isReturn
+            ? "Returner"
+            : "Ball Carrier";
+
+  return (
+    <div className="flex w-full max-w-md flex-col gap-4 pb-8">
+      <div className="rounded-xl bg-slate-900 px-4 py-3 text-sm text-slate-400">
+        <p>
+          <span className="font-semibold text-slate-300">Type:</span> {score.score_type}
+        </p>
+        <p>
+          <span className="font-semibold text-slate-300">Team:</span>{" "}
+          {score.scoring_team === "us" ? "Us" : "Opponent"}
+        </p>
+      </div>
+
+      {methodEditable ? (
+        <ToggleRow
+          label="Method"
+          value={method}
+          disabled={false}
+          onSelect={setMethod}
+          options={[
+            { value: "RUN", text: "Run", clean: true },
+            { value: "PASS", text: "Pass", clean: true },
+          ]}
+        />
+      ) : (
+        isTd && <p className="text-sm text-slate-400">Method: {score.method}</p>
+      )}
+
+      <ClockField label="Time (optional)" digits={time} onChange={setTime} />
+
+      {methodEditable && (
+        <p className="text-sm text-slate-400">
+          Distance: {score.distance_yards !== null ? `${score.distance_yards} yd` : "—"} (locked)
+        </p>
+      )}
+      {!methodEditable && score.score_type !== "SAFETY" && (
+        <NumberField
+          label={score.score_type === "FG" ? "Distance (yards)" : "Return Distance (optional)"}
+          value={distance}
+          onChange={setDistance}
+        />
+      )}
+
+      <NumberField label={`${playerLabel} # (optional)`} value={playerNumber} onChange={setPlayerNumber} />
+      <label className="flex flex-col gap-1">
+        <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">
+          {playerLabel} Name (optional)
+        </span>
+        <input
+          type="text"
+          value={playerName}
+          onChange={(e) => setPlayerName(e.target.value)}
+          className="rounded-xl bg-slate-800 px-4 py-3 text-lg font-bold text-slate-50"
+        />
+      </label>
+
+      {isTd && methodEditable && method === "PASS" && (
+        <>
+          <NumberField label="Passer # (optional)" value={passerNumber} onChange={setPasserNumber} />
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">
+              Passer Name (optional)
+            </span>
+            <input
+              type="text"
+              value={passerName}
+              onChange={(e) => setPasserName(e.target.value)}
+              className="rounded-xl bg-slate-800 px-4 py-3 text-lg font-bold text-slate-50"
+            />
+          </label>
+        </>
+      )}
+
+      {isTd && (
+        <div className="flex flex-col gap-4 border-t border-slate-800 pt-4">
+          <ToggleRow
+            label="Conversion"
+            value={conversionType}
+            disabled={false}
+            onSelect={setConversionType}
+            options={[
+              { value: "NONE", text: "No Attempt", clean: true },
+              { value: "PAT", text: "PAT", clean: true },
+              { value: "TWO_POINT", text: "2-Point", clean: true },
+            ]}
+          />
+
+          {conversionType !== "NONE" && (
+            <>
+              {conversionType === "TWO_POINT" && (
+                <ToggleRow
+                  label="Conversion Method"
+                  value={conversionMethod}
+                  disabled={false}
+                  onSelect={setConversionMethod}
+                  options={[
+                    { value: "RUN", text: "Run", clean: true },
+                    { value: "PASS", text: "Pass", clean: true },
+                  ]}
+                />
+              )}
+              <ToggleRow
+                label="Conversion Result"
+                value={conversionResult}
+                disabled={false}
+                onSelect={setConversionResult}
+                options={[
+                  { value: "GOOD", text: "Good", clean: true },
+                  { value: "NO_GOOD", text: "No Good", clean: false },
+                ]}
+              />
+              <NumberField
+                label={`${conversionType === "PAT" ? "Kicker" : "Player"} # (optional)`}
+                value={conversionPlayerNumber}
+                onChange={setConversionPlayerNumber}
+              />
+              <label className="flex flex-col gap-1">
+                <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">
+                  {conversionType === "PAT" ? "Kicker" : "Player"} Name (optional)
+                </span>
+                <input
+                  type="text"
+                  value={conversionPlayerName}
+                  onChange={(e) => setConversionPlayerName(e.target.value)}
+                  className="rounded-xl bg-slate-800 px-4 py-3 text-lg font-bold text-slate-50"
+                />
+              </label>
+              {conversionType === "TWO_POINT" && conversionMethod === "PASS" && (
+                <>
+                  <NumberField
+                    label="Passer # (optional)"
+                    value={conversionPasserNumber}
+                    onChange={setConversionPasserNumber}
+                  />
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">
+                      Passer Name (optional)
+                    </span>
+                    <input
+                      type="text"
+                      value={conversionPasserName}
+                      onChange={(e) => setConversionPasserName(e.target.value)}
+                      className="rounded-xl bg-slate-800 px-4 py-3 text-lg font-bold text-slate-50"
+                    />
+                  </label>
+                </>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      <button
+        type="button"
+        disabled={saving}
+        onClick={onSave}
+        className="rounded-xl bg-indigo-600 px-4 py-4 text-lg font-bold text-white active:bg-indigo-700 disabled:opacity-50"
+      >
+        {saving ? "Saving…" : "Save"}
+      </button>
     </div>
   );
 }
@@ -2120,15 +2834,19 @@ function ManageGameButton({ onClick }: { onClick: () => void }) {
 
 function ManageGameSheet({
   inProgress,
+  canEditScoring,
   onClose,
   onNewGame,
   onEndGame,
+  onEditScoring,
   onLogout,
 }: {
   inProgress: boolean;
+  canEditScoring: boolean;
   onClose: () => void;
   onNewGame: () => void;
   onEndGame: () => void;
+  onEditScoring: () => void;
   onLogout: () => void;
 }) {
   return (
@@ -2149,6 +2867,14 @@ function ManageGameSheet({
           className="rounded-xl bg-red-600 px-4 py-4 text-lg font-bold text-white active:bg-red-700 disabled:opacity-40"
         >
           End Game
+        </button>
+        <button
+          type="button"
+          disabled={!canEditScoring}
+          onClick={onEditScoring}
+          className="rounded-xl bg-slate-800 px-4 py-4 text-lg font-bold text-slate-100 active:bg-slate-700 disabled:opacity-40"
+        >
+          Edit Scoring
         </button>
         <button
           type="button"
