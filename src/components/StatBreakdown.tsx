@@ -62,7 +62,7 @@ function offenseRushingRows(r: RushingStats | undefined): StatRow[] {
 
 function offensePassingRows(p: PassingStats | undefined): StatRow[] {
   return [
-    ["Pass", fmtInt(p?.yards)],
+    ["Total Passing Yds", fmtInt(p?.yards)],
     ["Completions", fmtFraction(p?.completions, p?.attempts)],
     ["Yards Per Completion", fmtRate(p?.yardsPerCompletion)],
     ["Yards Per Attempt", fmtRate(p?.yardsPerAttempt)],
@@ -93,7 +93,7 @@ function defenseRushingRows(r: RushingStats | undefined): StatRow[] {
 
 function defensePassingRows(p: PassingStats | undefined): StatRow[] {
   return [
-    ["Pass Allowed", fmtInt(p?.yards)],
+    ["Passing Yds Allowed", fmtInt(p?.yards)],
     ["Completions Allowed", fmtFraction(p?.completions, p?.attempts)],
     ["Yards Per Completion Allowed", fmtRate(p?.yardsPerCompletion)],
     ["Yards Per Attempt Allowed", fmtRate(p?.yardsPerAttempt)],
